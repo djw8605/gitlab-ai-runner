@@ -24,7 +24,7 @@ from workspace import Workspace
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s – %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 logger = logging.getLogger("runner")
 
@@ -182,7 +182,7 @@ _FIX_SYSTEM_CONTEXT = textwrap.dedent(
 )
 
 
-def _parse_file_blocks(text: str) -> list[tuple[str, str]]:
+def parse_file_blocks(text: str) -> list[tuple[str, str]]:
     """Parse FILE: / ``` / END_FILE blocks from LLM output.
 
     Returns a list of (relative_path, content) tuples.
@@ -276,7 +276,7 @@ def run_fix(
         )
         sys.exit(1)
 
-    file_blocks = _parse_file_blocks(llm_output)
+    file_blocks = parse_file_blocks(llm_output)
     if not file_blocks:
         logger.warning("LLM returned no FILE blocks – nothing to commit")
         gl.post_note(

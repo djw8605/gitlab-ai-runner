@@ -170,7 +170,7 @@ class Workspace:
         """Attempt to run the test suite; returns (passed, output)."""
         repo = self.repo_dir
 
-        if (repo / "pytest.ini").exists() or (repo / "setup.cfg").exists() or (repo / "pyproject.toml").exists():
+        if self._has_pytest(repo):
             result = _run(
                 [sys.executable, "-m", "pytest", "-q", "--tb=short"],
                 cwd=repo,
@@ -200,8 +200,28 @@ class Workspace:
             output = (result.stdout or "") + (result.stderr or "")
             return result.returncode == 0, output
 
-        logger.info("No recognizable test suite found – skipping tests")
+        logger.info("No recognizable test suite found - skipping tests")
         return True, ""
+
+    @staticmethod
+    def _has_pytest(repo: Path) -> bool:
+        """Return True if the project is configured to use pytest."""
+        if (repo / "pytest.ini").exists():
+            return True
+        if (repo / "setup.cfg").exists():
+            content = (repo / "setup.cfg").read_text(encoding="utf-8", errors="ignore")
+            if "[tool:pytest]" in content:
+                return True
+        if (repo / "pyproject.toml").exists():
+            content = (repo / "pyproject.toml").read_text(encoding="utf-8", errors="ignore")
+            if "[tool.pytest" in content:
+                return True
+        # Also treat a tests/ or test/ directory alongside Python files as pytest
+        if (repo / "tests").is_dir() or (repo / "test").is_dir():
+            py_files = list(repo.glob("*.py")) + list(repo.glob("src/**/*.py"))
+            if py_files:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Branch name helpers
