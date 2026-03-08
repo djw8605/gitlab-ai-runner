@@ -45,7 +45,7 @@ def make_job_name(project_id: int, note_id: int, task_kind: str) -> str:
     """
     raw = f"{project_id}-{note_id}-{task_kind}"
     digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
-    return f"openhands-{digest}"
+    return f"crush-{digest}"
 
 
 def create_job(
@@ -70,7 +70,7 @@ def create_job(
     mem_lim = mem_limit or os.environ.get("JOB_MEM_LIMIT", DEFAULT_MEM_LIMIT)
 
     # Build the env list, masking sensitive values from logs
-    sensitive_keys = {"GITLAB_TOKEN", "LLM_API_KEY", "WEBHOOK_SECRET"}
+    sensitive_keys = {"GITLAB_TOKEN", "CRUSH_API_KEY", "LLM_API_KEY", "WEBHOOK_SECRET"}
     k8s_env = []
     for key, value in env_vars.items():
         k8s_env.append(client.V1EnvVar(name=key, value=value))
@@ -110,11 +110,11 @@ def create_job(
         restart_policy="Never",
         containers=[container],
         volumes=[workspace_volume],
-        service_account_name="openhands-webhook",
+        service_account_name="crush-webhook",
     )
 
     pod_template = client.V1PodTemplateSpec(
-        metadata=client.V1ObjectMeta(labels={"app": "openhands-runner"}),
+        metadata=client.V1ObjectMeta(labels={"app": "crush-runner"}),
         spec=pod_spec,
     )
 
@@ -130,7 +130,7 @@ def create_job(
         metadata=client.V1ObjectMeta(
             name=job_name,
             namespace=namespace,
-            labels={"app": "openhands-runner"},
+            labels={"app": "crush-runner"},
         ),
         spec=job_spec,
     )

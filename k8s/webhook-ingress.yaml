@@ -4,8 +4,8 @@
 # apiVersion: networking.k8s.io/v1
 # kind: Ingress
 # metadata:
-#   name: openhands-webhook
-#   namespace: openhands
+#   name: crush-webhook
+#   namespace: crush
 #   annotations:
 #     nginx.ingress.kubernetes.io/proxy-body-size: "2m"
 #     cert-manager.io/cluster-issuer: "letsencrypt-prod"  # remove if not using cert-manager
@@ -13,16 +13,16 @@
 #   ingressClassName: nginx
 #   tls:
 #     - hosts:
-#         - openhands-webhook.example.com  # replace with your domain
-#       secretName: openhands-webhook-tls
+#         - crush-webhook.example.com  # replace with your domain
+#       secretName: crush-webhook-tls
 #   rules:
-#     - host: openhands-webhook.example.com
+#     - host: crush-webhook.example.com
 #       http:
 #         paths:
 #           - path: /webhook
 #             pathType: Prefix
 #             backend:
 #               service:
-#                 name: openhands-webhook
+#                 name: crush-webhook
 #                 port:
 #                   number: 80

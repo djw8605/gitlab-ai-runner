@@ -91,6 +91,14 @@ class GitLabClient:
         """Return MR changes/diff dict."""
         return self._get(f"/projects/{project_id}/merge_requests/{mr_iid}/changes")
 
+    def get_mr_notes(self, project_id: int, mr_iid: int) -> list[dict]:
+        """Return MR notes/comments sorted oldest to newest (first page)."""
+        data = self._get(
+            f"/projects/{project_id}/merge_requests/{mr_iid}/notes",
+            params={"order_by": "created_at", "sort": "asc", "per_page": 100},
+        )
+        return data if isinstance(data, list) else []
+
     # ------------------------------------------------------------------
     # Issue helpers
     # ------------------------------------------------------------------
@@ -98,6 +106,14 @@ class GitLabClient:
     def get_issue(self, project_id: int, issue_iid: int) -> dict:
         """Return issue metadata dict."""
         return self._get(f"/projects/{project_id}/issues/{issue_iid}")
+
+    def get_issue_notes(self, project_id: int, issue_iid: int) -> list[dict]:
+        """Return issue notes/comments sorted oldest to newest (first page)."""
+        data = self._get(
+            f"/projects/{project_id}/issues/{issue_iid}/notes",
+            params={"order_by": "created_at", "sort": "asc", "per_page": 100},
+        )
+        return data if isinstance(data, list) else []
 
     # ------------------------------------------------------------------
     # Project helpers

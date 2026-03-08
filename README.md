@@ -1,6 +1,6 @@
 # gitlab-ai-runner
 
-A self-hosted GitLab **@openhands** mention automation that launches Kubernetes Jobs to run an AI coding agent backed by a local OpenAI-compatible vLLM endpoint.
+A self-hosted GitLab **@crush** mention automation that launches Kubernetes Jobs to run a Crush-based coding agent against an OpenAI-compatible endpoint (for example, vLLM).
 
 ---
 
@@ -26,15 +26,17 @@ A self-hosted GitLab **@openhands** mention automation that launches Kubernetes 
 GitLab ──webhook──► webhook receiver (FastAPI, always-on Deployment)
                          │
                          ├─ validates secret & event type
-                         ├─ parses @openhands command
+                         ├─ parses @crush command + user prompt tail
                          ├─ adds 👀 reaction to triggering comment
                          ├─ creates Kubernetes Job (runner)
                          └─ adds 🚀 reaction after successful job creation
 
                     Kubernetes Job (ephemeral runner)
                          │
-                         ├─ review: fetches MR diff → LLM → posts MR note
-                         └─ fix:    clones repo → LLM → commits → pushes
+                         ├─ review: fetches MR diff + MR comments + prompt tail
+                         │          → crush (batch) → posts MR note
+                         └─ fix:    clones repo, gathers issue/MR context + prompt tail
+                                    → crush (batch + tools) → commits → pushes
                                     → opens new MR → posts link
 ```
 
@@ -54,20 +56,23 @@ gitlab-ai-runner/
 ├── runner/
 │   ├── runner.py        # Job entrypoint
 │   ├── gitlab.py        # GitLab client (shared logic)
-│   ├── llm.py           # OpenAI-compatible vLLM client wrapper
+│   ├── llm.py           # Legacy LLM wrapper (not used by the crush runner)
 │   ├── workspace.py     # git clone/branch/commit/push + test runner
 │   └── requirements.txt
 ├── Dockerfile.webhook   # Image for the webhook receiver Deployment
 ├── Dockerfile.runner    # Image for the ephemeral runner Job
 ├── k8s/
+│   ├── kustomization.yaml
+│   ├── config.env
+│   ├── secrets.env.example
 │   ├── serviceaccount.yaml
 │   ├── role.yaml
 │   ├── rolebinding.yaml
 │   ├── webhook-deployment.yaml
 │   ├── webhook-service.yaml
 │   ├── webhook-ingress.yaml  # optional – disabled by default
-│   ├── configmap.yaml
-│   └── secrets.yaml          # ⚠️  DO NOT COMMIT with real values
+│   ├── configmap.yaml        # legacy static manifest (optional)
+│   └── secrets.yaml          # legacy static manifest (optional)
 └── README.md
 ```
 
@@ -77,7 +82,7 @@ gitlab-ai-runner/
 
 | Step | Action | Emoji |
 |------|--------|-------|
-| 1 | Webhook validated; comment starts with `@openhands`; user passes allowlist | 👀 `eyes` |
+| 1 | Webhook validated; comment starts with `@crush`; user passes allowlist | 👀 `eyes` |
 | 2 | Kubernetes Job created successfully | 🚀 `rocket` |
 | 2 (error) | Job creation failed → post failure comment instead | *(no 🚀)* |
 
@@ -114,17 +119,14 @@ At the **project level**, the bot account must have at least **Developer** role 
 
 ## Kubernetes RBAC
 
-The webhook receiver runs under the `openhands-webhook` ServiceAccount.  All RBAC is **namespace-scoped** (not cluster-wide).
+The webhook receiver runs under the `crush-webhook` ServiceAccount.  All RBAC is **namespace-scoped** (not cluster-wide).
 
 | Resource | API Group | Verbs | Reason |
 |----------|-----------|-------|--------|
 | `jobs` | `batch` | `create, get, list, watch, delete` | Create and inspect runner Jobs; delete is optional but enables cleanup |
 | `pods` | *(core)* | `get, list, watch` | Optional: allows the receiver to link to pod logs when diagnosing failures |
 
-Deploy order:
-1. `serviceaccount.yaml`
-2. `role.yaml`
-3. `rolebinding.yaml`
+These RBAC resources are included in `k8s/kustomization.yaml` and applied with `kubectl apply -k k8s`.
 
 ---
 
@@ -135,15 +137,15 @@ Deploy order:
 export REGISTRY=registry.example.com/myorg
 
 # Build and push the webhook receiver
-docker build -f Dockerfile.webhook -t $REGISTRY/openhands-webhook:latest .
-docker push $REGISTRY/openhands-webhook:latest
+docker build -f Dockerfile.webhook -t $REGISTRY/crush-webhook:latest .
+docker push $REGISTRY/crush-webhook:latest
 
 # Build and push the runner Job image
-docker build -f Dockerfile.runner -t $REGISTRY/openhands-runner:latest .
-docker push $REGISTRY/openhands-runner:latest
+docker build -f Dockerfile.runner -t $REGISTRY/crush-runner:latest .
+docker push $REGISTRY/crush-runner:latest
 ```
 
-Then update `k8s/configmap.yaml` (JOB_IMAGE) and `k8s/webhook-deployment.yaml` with your actual registry paths.
+Then update `k8s/config.env` with your actual `WEBHOOK_IMAGE` and `JOB_IMAGE` values.
 
 ---
 
@@ -151,33 +153,27 @@ Then update `k8s/configmap.yaml` (JOB_IMAGE) and `k8s/webhook-deployment.yaml` w
 
 ```bash
 # 1. Create the namespace (if it doesn't exist)
-kubectl create namespace openhands
+kubectl create namespace crush
 
-# 2. Apply RBAC
-kubectl apply -f k8s/serviceaccount.yaml
-kubectl apply -f k8s/role.yaml
-kubectl apply -f k8s/rolebinding.yaml
+# 2. Set non-secret runtime config
+$EDITOR k8s/config.env
 
-# 3. Fill in secrets (see k8s/secrets.yaml for fields) and apply
-#    ⚠️  Never commit secrets.yaml with real values
-kubectl apply -f k8s/secrets.yaml
+# 3. Create secrets input (do not commit k8s/secrets.env)
+cp k8s/secrets.env.example k8s/secrets.env
+$EDITOR k8s/secrets.env
 
-# 4. Apply ConfigMap
-kubectl apply -f k8s/configmap.yaml
+# 4. Deploy all required resources (RBAC + ConfigMap + Secret + Deployment + Service)
+kubectl apply -k k8s
 
-# 5. Deploy webhook receiver
-kubectl apply -f k8s/webhook-deployment.yaml
-kubectl apply -f k8s/webhook-service.yaml
-
-# 6. (Optional) Expose via Ingress
+# 5. (Optional) Expose via Ingress
 #    Edit k8s/webhook-ingress.yaml and uncomment the YAML, then:
 kubectl apply -f k8s/webhook-ingress.yaml
 ```
 
 Verify the deployment:
 ```bash
-kubectl -n openhands rollout status deployment/openhands-webhook
-kubectl -n openhands get pods
+kubectl -n crush rollout status deployment/crush-webhook
+kubectl -n crush get pods
 curl http://<SERVICE_IP>/healthz   # should return {"status":"ok"}
 ```
 
@@ -191,8 +187,8 @@ curl http://<SERVICE_IP>/healthz   # should return {"status":"ok"}
 
 | Field | Value |
 |-------|-------|
-| URL | `https://openhands-webhook.example.com/webhook` |
-| Secret token | The value you set as `WEBHOOK_SECRET` in `k8s/secrets.yaml` |
+| URL | `https://crush-webhook.example.com/webhook` |
+| Secret token | The value you set as `WEBHOOK_SECRET` in `k8s/secrets.env` |
 | Trigger | ☑️ **Comments** (Note events) |
 
 4. Uncheck all other triggers.
@@ -206,11 +202,12 @@ curl http://<SERVICE_IP>/healthz   # should return {"status":"ok"}
 
 Comment on any GitLab Issue or Merge Request with one of:
 
-### `@openhands review`
+### `@crush review`
 *Works on Merge Requests only.*
 
 ```
-@openhands review
+@crush review
+@crush review focus on auth edge-cases and suggest tests
 ```
 
 The runner fetches the MR diff and posts a structured review with sections:
@@ -220,11 +217,14 @@ The runner fetches the MR diff and posts a structured review with sections:
 - Suggested Tests
 - Security Notes
 
-### `@openhands fix`
+Anything after `@crush` is forwarded to crush as additional prompt text.
+
+### `@crush fix`
 *Works on Issues and Merge Requests.*
 
 ```
-@openhands fix
+@crush fix
+@crush fix prioritize minimal patch, and add regression test
 ```
 
 The runner:
@@ -233,7 +233,7 @@ The runner:
 3. Creates a branch:
    - Issues → `ai/issue-<iid>-<short-slug>`
    - MRs    → `ai/mr-<iid>-fix`
-4. Generates code changes via the LLM.
+4. Runs `crush` in batch mode (`--yolo`) so it can use tools and edit files without interactive permission prompts.
 5. Runs the test suite (pytest / npm test / go test).
 6. If tests pass: commits, pushes, and opens a new MR.
 7. Comments a link back to the original issue/MR.
@@ -250,10 +250,13 @@ The runner:
 | `GITLAB_BASE_URL` | ConfigMap | GitLab instance URL, e.g. `https://gitlab.example.com` |
 | `GITLAB_TOKEN` | Secret | GitLab PAT with api + read/write_repository scopes |
 | `K8S_NAMESPACE` | ConfigMap | Namespace for runner Jobs (default: current pod namespace) |
+| `WEBHOOK_IMAGE` | ConfigMap | Container image for webhook Deployment |
 | `JOB_IMAGE` | ConfigMap | Container image for runner Jobs |
-| `LLM_BASE_URL` | ConfigMap | vLLM endpoint including `/v1`, e.g. `http://vllm:8000/v1` |
-| `LLM_MODEL` | ConfigMap | Model name registered in vLLM |
-| `LLM_API_KEY` | Secret | API key for vLLM (any string if auth disabled) |
+| `CRUSH_BASE_URL` | ConfigMap | Crush model provider endpoint including `/v1`, e.g. `http://vllm:8000/v1` |
+| `CRUSH_MODEL` | ConfigMap | Model name exposed by your provider |
+| `CRUSH_API_KEY` | Secret | API key for the provider (any string if auth is disabled) |
+| `CRUSH_ALLOWED_TOOLS` | ConfigMap | Comma-separated tools auto-allowed in crush config (default: `view,ls,grep,edit,bash`) |
+| `CRUSH_TIMEOUT_SECONDS` | ConfigMap | Timeout for each crush invocation (default: `1800`) |
 | `ALLOWED_USERS` | ConfigMap | Comma-separated GitLab usernames; empty = allow all |
 | `JOB_TTL_SECONDS` | ConfigMap | Job TTL after completion (default: `1800`) |
 | `JOB_CPU_LIMIT` | ConfigMap | CPU limit for runner Jobs (default: `4`) |
@@ -271,9 +274,12 @@ The runner:
 | `KIND` | `issue` or `mr` |
 | `GITLAB_BASE_URL` | Passed through from receiver |
 | `GITLAB_TOKEN` | Passed through from receiver |
-| `LLM_BASE_URL` | Passed through from receiver |
-| `LLM_MODEL` | Passed through from receiver |
-| `LLM_API_KEY` | Passed through from receiver |
+| `CRUSH_BASE_URL` | Passed through from receiver |
+| `CRUSH_MODEL` | Passed through from receiver |
+| `CRUSH_API_KEY` | Passed through from receiver |
+| `CRUSH_ALLOWED_TOOLS` | Passed through from receiver |
+| `CRUSH_TIMEOUT_SECONDS` | Passed through from receiver |
+| `CRUSH_USER_PROMPT` | Entire text after `@crush` from the triggering comment |
 
 ---
 
@@ -288,7 +294,7 @@ The runner:
 
 ### No 👀 reaction appears
 - Check that `GITLAB_TOKEN` has the `api` scope.
-- Check receiver logs: `kubectl -n openhands logs deploy/openhands-webhook`
+- Check receiver logs: `kubectl -n crush logs deploy/crush-webhook`
 - Verify the bot account has at least **Reporter** access to the project.
 
 ### Job is created but no 🚀 reaction
@@ -296,10 +302,10 @@ The runner:
 - The bot account may lack permission to add reactions (needs **Reporter** or higher).
 
 ### Runner Job fails / no MR created
-- Fetch Job logs: `kubectl -n openhands logs job/<job-name>`
+- Fetch Job logs: `kubectl -n crush logs job/<job-name>`
 - Common causes:
   - `GITLAB_TOKEN` lacks `write_repository` scope → push fails.
-  - LLM returned no FILE blocks → check `LLM_BASE_URL` and `LLM_MODEL`.
+  - `crush` provider configuration invalid or unreachable → check `CRUSH_BASE_URL`, `CRUSH_MODEL`, and `CRUSH_API_KEY`.
   - Test suite fails → fix the tests or the generated code.
 
 ### Duplicate Jobs
@@ -308,7 +314,9 @@ The runner:
 
 ### Checking runner Job status
 ```bash
-kubectl -n openhands get jobs
-kubectl -n openhands describe job <job-name>
-kubectl -n openhands logs job/<job-name>
+kubectl -n crush get jobs
+kubectl -n crush describe job <job-name>
+kubectl -n crush logs job/<job-name>
 ```
+
+Runner logs include streamed `crush` stdout/stderr lines (prefixed as `crush stdout | ...` / `crush stderr | ...`), including the final `## Thinking` and `## Files Changed` sections from batch mode output.

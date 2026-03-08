@@ -1,15 +1,15 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: openhands-webhook
-  namespace: openhands
+  name: crush-webhook
+  namespace: crush
   labels:
-    app: openhands-webhook
+    app: crush-webhook
 subjects:
   - kind: ServiceAccount
-    name: openhands-webhook
-    namespace: openhands
+    name: crush-webhook
+    namespace: crush
 roleRef:
   kind: Role
-  name: openhands-webhook
+  name: crush-webhook
   apiGroup: rbac.authorization.k8s.io

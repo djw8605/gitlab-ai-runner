@@ -1,13 +1,25 @@
-# Dockerfile.runner – build the ephemeral agent runner Job image
+# Dockerfile.runner - build the ephemeral Crush runner Job image
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# System dependencies for git operations and optional test runners
+# System dependencies for git operations and crush installation
+ARG CRUSH_VERSION=0.47.2
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git \
         curl \
+        ca-certificates \
+        tar \
+    && arch=\"$(dpkg --print-architecture)\" \
+    && case \"$arch\" in \
+         amd64) crush_arch=\"x86_64\" ;; \
+         arm64) crush_arch=\"arm64\" ;; \
+         *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL \"https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_Linux_${crush_arch}.tar.gz\" \
+      | tar -xz -C /usr/local/bin crush \
+    && chmod +x /usr/local/bin/crush \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
@@ -21,6 +33,6 @@ COPY runner/ /app/
 RUN useradd -m -u 1000 runner
 USER runner
 
-# The entrypoint is invoked by the Kubernetes Job spec as:
-#   python /app/runner.py
+# The entrypoint is invoked by the Kubernetes Job spec as python /app/runner.py.
+# runner.py orchestrates GitLab calls and invokes crush in batch mode.
 CMD ["python", "/app/runner.py"]

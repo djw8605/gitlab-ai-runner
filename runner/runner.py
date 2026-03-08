@@ -7,16 +7,18 @@ and posts results back to GitLab.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 from typing import Optional
 
 from gitlab import GitLabClient, GitLabError
-from llm import LLMClient, LLMError
-from workspace import Workspace
+from workspace import MAX_DIFF_CHARS, Workspace
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -27,6 +29,13 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 logger = logging.getLogger("runner")
+
+DEFAULT_CRUSH_ALLOWED_TOOLS = "view,ls,grep,edit,bash"
+DEFAULT_CRUSH_TIMEOUT_SECONDS = 1800
+MAX_CONTEXT_NOTES = 30
+MAX_NOTE_BODY_CHARS = 1200
+MAX_NOTES_CONTEXT_CHARS = 16000
+
 
 # ---------------------------------------------------------------------------
 # Env helpers
@@ -45,35 +54,215 @@ def _optional(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _require_any(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    logger.error("Required env var is missing; expected one of: %s", ", ".join(names))
+    sys.exit(1)
+
+
+def _parse_allowed_tools(raw: str) -> list[str]:
+    tools = [tool.strip() for tool in raw.split(",") if tool.strip()]
+    if not tools:
+        tools = [tool.strip() for tool in DEFAULT_CRUSH_ALLOWED_TOOLS.split(",")]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for tool in tools:
+        if tool not in seen:
+            deduped.append(tool)
+            seen.add(tool)
+    return deduped
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    raw = _optional(name, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r, using default %d", name, raw, default)
+        return default
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n... [truncated] ..."
+
+
+def _format_notes_context(notes: list[dict]) -> str:
+    """Render issue/MR notes into compact context for prompts."""
+    if not notes:
+        return "None."
+
+    entries: list[str] = []
+    for note in notes[-MAX_CONTEXT_NOTES:]:
+        if note.get("system"):
+            continue
+        author = (note.get("author") or {}).get("username", "unknown")
+        body = str(note.get("body", "")).strip()
+        if not body:
+            continue
+        body = _truncate(body, MAX_NOTE_BODY_CHARS)
+        entries.append(f"[{author}]\n{body}")
+
+    if not entries:
+        return "None."
+
+    merged = "\n\n---\n\n".join(entries)
+    return _truncate(merged, MAX_NOTES_CONTEXT_CHARS)
+
+
+# ---------------------------------------------------------------------------
+# Crush helpers
+# ---------------------------------------------------------------------------
+
+
+def _write_crush_config(
+    config_path: Path,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    allowed_tools: list[str],
+) -> None:
+    """Write a project-local crush.json so non-interactive runs are deterministic."""
+    cfg = {
+        "$schema": "https://charm.land/crush.json",
+        "providers": {
+            "local": {
+                "name": "Local OpenAI-Compatible",
+                "type": "openai-compat",
+                "base_url": base_url,
+                "api_key": api_key,
+                "models": [
+                    {
+                        "id": model,
+                        "name": model,
+                    }
+                ],
+            }
+        },
+        "models": {
+            "large": {
+                "provider": "local",
+                "model": model,
+            },
+            "small": {
+                "provider": "local",
+                "model": model,
+            },
+        },
+        "permissions": {
+            "allowed_tools": allowed_tools,
+        },
+        "options": {
+            "disable_metrics": True,
+        },
+    }
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote %s", config_path)
+
+
+def _run_crush(
+    *,
+    cwd: Path,
+    prompt: str,
+    model: str,
+    config_path: Path,
+    data_dir: Path,
+    timeout_seconds: int,
+) -> str:
+    """Execute crush in non-interactive mode, stream logs, and return stdout."""
+    cmd = [
+        "crush",
+        "--yolo",
+        "--cwd",
+        str(cwd),
+        "--data-dir",
+        str(data_dir),
+        "run",
+        "--quiet",
+        "--model",
+        f"local/{model}",
+    ]
+    logger.info("Running crush in %s", cwd)
+
+    env = os.environ.copy()
+    env["CRUSH_DISABLE_METRICS"] = "1"
+    env["CRUSH_GLOBAL_CONFIG"] = str(config_path)
+    env["CRUSH_GLOBAL_DATA"] = str(data_dir)
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("crush binary not found in runner image") from exc
+
+    stdout_buf: list[str] = []
+    stderr_buf: list[str] = []
+
+    def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
+        if stream is None:
+            return
+        # line-buffered stream copy so crush output appears in pod logs.
+        for line in iter(stream.readline, ""):
+            buf.append(line)
+            text = line.rstrip()
+            if text:
+                logger.info("crush %s | %s", prefix, text)
+        stream.close()
+
+    out_thread = threading.Thread(
+        target=_pump, args=(proc.stdout, "stdout", stdout_buf), daemon=True
+    )
+    err_thread = threading.Thread(
+        target=_pump, args=(proc.stderr, "stderr", stderr_buf), daemon=True
+    )
+    out_thread.start()
+    err_thread.start()
+
+    try:
+        if proc.stdin is not None:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        result_code = proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        raise RuntimeError(f"crush timed out after {timeout_seconds}s") from exc
+    finally:
+        out_thread.join()
+        err_thread.join()
+
+    stdout = "".join(stdout_buf).strip()
+    stderr = "".join(stderr_buf).strip()
+
+    if result_code != 0:
+        detail = stderr[-3000:] if stderr else stdout[-3000:]
+        raise RuntimeError(f"crush failed with exit code {result_code}: {detail}")
+
+    output = stdout
+    if not output:
+        raise RuntimeError("crush returned an empty response")
+
+    return output
+
+
 # ---------------------------------------------------------------------------
 # Review task
 # ---------------------------------------------------------------------------
-
-_REVIEW_SYSTEM = textwrap.dedent(
-    """\
-    You are an expert code reviewer. You will be given a GitLab Merge Request
-    title, description, and unified diff. Produce a structured review with the
-    following sections:
-
-    ## Summary
-    A concise overview of what the MR does.
-
-    ## Major Issues
-    Any blocking problems: bugs, security flaws, incorrect logic.
-
-    ## Minor Issues
-    Style, naming, small improvements.
-
-    ## Suggested Tests
-    Specific test cases that are missing or should be added.
-
-    ## Security Notes
-    Any security concerns, even minor ones.
-
-    Be specific and cite file names and line numbers where relevant.
-    If a section has no items write "None identified."
-    """
-)
 
 
 def _format_diff(changes: dict) -> str:
@@ -84,54 +273,87 @@ def _format_diff(changes: dict) -> str:
         diff = change.get("diff", "")
         diff_parts.append(f"--- {path} ---\n{diff}")
     full = "\n".join(diff_parts)
-    from workspace import MAX_DIFF_CHARS
-
     if len(full) > MAX_DIFF_CHARS:
-        full = full[:MAX_DIFF_CHARS] + "\n… [diff truncated] …"
+        full = full[:MAX_DIFF_CHARS] + "\n... [diff truncated] ..."
     return full
 
 
 def run_review(
     gl: GitLabClient,
-    llm: LLMClient,
+    *,
     project_id: int,
     mr_iid: int,
-    kind: str,
-    note_id: int,
+    crush_user_prompt: str,
+    crush_model: str,
+    crush_config_path: Path,
+    crush_data_dir: Path,
+    crush_timeout_seconds: int,
+    crush_workdir: Path,
 ) -> None:
-    """Fetch MR diff, produce a review via LLM, post as a note."""
+    """Fetch MR diff, produce a review via crush, post as a note."""
     logger.info("Starting REVIEW task for MR !%d", mr_iid)
 
     mr = gl.get_mr(project_id, mr_iid)
     changes = gl.get_mr_changes(project_id, mr_iid)
+    mr_notes = gl.get_mr_notes(project_id, mr_iid)
 
     title = mr.get("title", "")
     description = mr.get("description", "")
     diff_text = _format_diff(changes)
+    notes_context = _format_notes_context(mr_notes)
+    user_prompt = crush_user_prompt or "(none)"
 
-    user_prompt = (
-        f"MR Title: {title}\n\n"
-        f"MR Description:\n{description}\n\n"
-        f"Diff:\n```diff\n{diff_text}\n```"
+    prompt = textwrap.dedent(
+        f"""\
+        You are an expert code reviewer.
+
+        Review the following GitLab merge request and produce Markdown with these exact sections:
+        - ## Summary
+        - ## Major Issues
+        - ## Minor Issues
+        - ## Suggested Tests
+        - ## Security Notes
+
+        Be specific and include file names/line numbers when relevant.
+        If a section has no findings, write: None identified.
+
+        MR Title: {title}
+
+        MR Description:
+        {description}
+
+        Additional Prompt from Trigger Comment (everything after @crush):
+        {user_prompt}
+
+        Merge Request Comment Context:
+        {notes_context}
+
+        Diff:
+        ```diff
+        {diff_text}
+        ```
+        """
     )
 
-    logger.info("Requesting LLM review …")
     try:
-        review_text = llm.complete(
-            system_prompt=_REVIEW_SYSTEM,
-            user_prompt=user_prompt,
-            max_tokens=2048,
+        review_text = _run_crush(
+            cwd=crush_workdir,
+            prompt=prompt,
+            model=crush_model,
+            config_path=crush_config_path,
+            data_dir=crush_data_dir,
+            timeout_seconds=crush_timeout_seconds,
         )
-    except LLMError as exc:
-        logger.error("LLM review failed: %s", exc)
+    except RuntimeError as exc:
+        logger.error("Crush review failed: %s", exc)
         gl.post_mr_note(
             project_id,
             mr_iid,
-            f"⚠️ **OpenHands**: LLM review failed.\n\n```\n{exc}\n```",
+            f"⚠️ **Crush**: review failed.\n\n```\n{exc}\n```",
         )
         sys.exit(1)
 
-    note_body = f"## 🤖 OpenHands Code Review\n\n{review_text}"
+    note_body = f"## 🤖 Crush Code Review\n\n{review_text}"
     gl.post_mr_note(project_id, mr_iid, note_body)
     logger.info("Posted review to MR !%d", mr_iid)
 
@@ -140,73 +362,22 @@ def run_review(
 # Fix task (shared for issue and MR-fix)
 # ---------------------------------------------------------------------------
 
-_FIX_SYSTEM = textwrap.dedent(
-    """\
-    You are an expert software engineer. You will be given a task description
-    (either a bug report or a feature request) and the relevant project context.
-
-    Your job:
-    1. Analyse the problem.
-    2. Propose a concrete plan (files to modify or create).
-    3. Output the FULL content of each file you want to create or modify in the
-       following format (repeat for each file):
-
-    FILE: <relative/path/to/file>
-    ```
-    <complete file content>
-    ```
-    END_FILE
-
-    Rules:
-    - Output ONLY the FILE blocks and a short summary at the end.
-    - Do not truncate file content; output the complete file.
-    - Keep changes focused and minimal.
-    - Do not add unnecessary comments.
-    """
-)
-
-_FIX_SYSTEM_CONTEXT = textwrap.dedent(
-    """\
-    You are an expert software engineer. Given a task, produce a brief plan and
-    then output complete file contents for each file you want to change or
-    create, using the format:
-
-    FILE: <relative/path/to/file>
-    ```
-    <complete file content>
-    ```
-    END_FILE
-
-    Keep changes minimal, correct, and focused on the task.
-    """
-)
-
-
-def parse_file_blocks(text: str) -> list[tuple[str, str]]:
-    """Parse FILE: / ``` / END_FILE blocks from LLM output.
-
-    Returns a list of (relative_path, content) tuples.
-    """
-    import re
-
-    pattern = re.compile(
-        r"FILE:\s*(.+?)\n```[^\n]*\n(.*?)```\s*END_FILE",
-        re.DOTALL,
-    )
-    return [(m.group(1).strip(), m.group(2)) for m in pattern.finditer(text)]
-
 
 def run_fix(
     gl: GitLabClient,
-    llm: LLMClient,
     ws: Workspace,
+    *,
     project_id: int,
     kind: str,
     iid: int,
-    note_id: int,
     task_kind: str,
+    crush_user_prompt: str,
+    crush_model: str,
+    crush_config_path: Path,
+    crush_data_dir: Path,
+    crush_timeout_seconds: int,
 ) -> None:
-    """Fix an issue or MR: generate code changes, push branch, open MR."""
+    """Fix an issue or MR: let crush edit code, push branch, open MR."""
     logger.info("Starting FIX task (%s) for %s #%d", task_kind, kind, iid)
 
     project = gl.get_project(project_id)
@@ -214,35 +385,38 @@ def run_fix(
     default_branch: str = project.get("default_branch", "main")
     gitlab_base_url = os.environ.get("GITLAB_BASE_URL", "")
     gitlab_token = os.environ.get("GITLAB_TOKEN", "")
+    item_notes: list[dict] = []
 
-    # --- Fetch description ------------------------------------------------
     if task_kind == "fix_issue":
         item = gl.get_issue(project_id, iid)
+        item_notes = gl.get_issue_notes(project_id, iid)
         item_title: str = item.get("title", f"Issue #{iid}")
         item_description: str = item.get("description", "")
         base_branch = default_branch
         new_branch = ws.issue_branch(iid, item_title)
         back_ref = f"issue #{iid}"
-        mr_title = f"fix: resolve issue #{iid} – {item_title}"
+        context_label = "Issue Comment Context"
+        mr_title = f"fix: resolve issue #{iid} - {item_title}"
         mr_description = (
             f"Closes #{iid}\n\n"
-            f"This MR was automatically generated by OpenHands in response to "
+            f"This MR was automatically generated by Crush in response to "
             f"[issue #{iid}]({item.get('web_url', '')})."
         )
     else:  # fix_mr
         item = gl.get_mr(project_id, iid)
+        item_notes = gl.get_mr_notes(project_id, iid)
         item_title = item.get("title", f"MR !{iid}")
         item_description = item.get("description", "")
         base_branch = item.get("target_branch", default_branch)
         new_branch = ws.mr_fix_branch(iid)
         back_ref = f"MR !{iid}"
+        context_label = "Merge Request Comment Context"
         mr_title = f"fix: address changes requested in !{iid}"
         mr_description = (
-            f"This MR was automatically generated by OpenHands in response to "
+            f"This MR was automatically generated by Crush in response to "
             f"[MR !{iid}]({item.get('web_url', '')})."
         )
 
-    # --- Clone repo -------------------------------------------------------
     ws.clone(
         gitlab_base_url=gitlab_base_url,
         path_with_namespace=path_with_namespace,
@@ -251,49 +425,62 @@ def run_fix(
     )
     ws.create_branch(new_branch)
 
-    # --- Ask LLM for changes ----------------------------------------------
-    user_prompt = (
-        f"Project: {path_with_namespace}\n"
-        f"Task: {item_title}\n\n"
-        f"Description:\n{item_description}\n\n"
-        f"Produce file changes to resolve this task."
+    notes_context = _format_notes_context(item_notes)
+    user_prompt = crush_user_prompt or "(none)"
+
+    prompt = textwrap.dedent(
+        f"""\
+        You are a coding agent operating in batch mode inside this repository.
+
+        Task kind: {task_kind}
+        Project: {path_with_namespace}
+        Target: {back_ref}
+        Title: {item_title}
+
+        Description:
+        {item_description}
+
+        Additional Prompt from Trigger Comment (everything after @crush):
+        {user_prompt}
+
+        {context_label}:
+        {notes_context}
+
+        Instructions:
+        - Implement the smallest correct fix for the request.
+        - Edit files directly in this working tree.
+        - Use available tools as needed (including bash/edit/view/grep/ls).
+        - Do NOT commit or push.
+        - Run relevant tests or checks when possible.
+        - Keep your reasoning concise and practical.
+        - Finish by printing a short Markdown summary with sections:
+          ## Thinking
+          ## Summary
+          ## Files Changed
+          ## Tests Run
+        """
     )
 
-    logger.info("Requesting LLM code generation …")
     try:
-        llm_output = llm.complete(
-            system_prompt=_FIX_SYSTEM_CONTEXT,
-            user_prompt=user_prompt,
-            max_tokens=4096,
+        crush_summary = _run_crush(
+            cwd=ws.repo_dir,
+            prompt=prompt,
+            model=crush_model,
+            config_path=crush_config_path,
+            data_dir=crush_data_dir,
+            timeout_seconds=crush_timeout_seconds,
         )
-    except LLMError as exc:
-        logger.error("LLM fix generation failed: %s", exc)
+    except RuntimeError as exc:
+        logger.error("Crush fix failed: %s", exc)
         gl.post_note(
             project_id,
             kind,
             iid,
-            f"⚠️ **OpenHands**: LLM code generation failed.\n\n```\n{exc}\n```",
+            f"⚠️ **Crush**: automated fix failed.\n\n```\n{exc}\n```",
         )
         sys.exit(1)
 
-    file_blocks = parse_file_blocks(llm_output)
-    if not file_blocks:
-        logger.warning("LLM returned no FILE blocks – nothing to commit")
-        gl.post_note(
-            project_id,
-            kind,
-            iid,
-            "⚠️ **OpenHands**: The LLM did not produce any file changes. "
-            "Please refine the request.",
-        )
-        sys.exit(1)
-
-    logger.info("LLM produced %d file block(s)", len(file_blocks))
-    for rel_path, content in file_blocks:
-        ws.write_file(rel_path, content)
-
-    # --- Commit -----------------------------------------------------------
-    commit_msg = f"chore: OpenHands automated fix for {back_ref}\n\nTask: {item_title}"
+    commit_msg = f"chore: Crush automated fix for {back_ref}\n\nTask: {item_title}"
     ws.commit_all(commit_msg)
 
     if not ws.has_changes() and not _branch_has_commits(ws, base_branch, new_branch):
@@ -301,11 +488,10 @@ def run_fix(
             project_id,
             kind,
             iid,
-            "ℹ️ **OpenHands**: No changes were necessary – the issue may already be resolved.",
+            "ℹ️ **Crush**: no code changes were necessary.",
         )
         return
 
-    # --- Run tests --------------------------------------------------------
     passed, test_output = ws.run_tests()
     if not passed:
         test_snippet = test_output[-3000:] if len(test_output) > 3000 else test_output
@@ -313,15 +499,13 @@ def run_fix(
             project_id,
             kind,
             iid,
-            f"⚠️ **OpenHands**: Tests failed after applying changes. "
+            f"⚠️ **Crush**: tests failed after applying changes. "
             f"Branch `{new_branch}` was NOT pushed.\n\n```\n{test_snippet}\n```",
         )
         sys.exit(1)
 
-    # --- Push branch ------------------------------------------------------
     ws.push(new_branch)
 
-    # --- Open Merge Request -----------------------------------------------
     try:
         new_mr = gl.create_merge_request(
             project_id=project_id,
@@ -338,26 +522,25 @@ def run_fix(
             project_id,
             kind,
             iid,
-            f"⚠️ **OpenHands**: Branch `{new_branch}` was pushed but MR creation failed.\n"
+            f"⚠️ **Crush**: branch `{new_branch}` was pushed but MR creation failed.\n"
             f"Please open the MR manually.\n\n```\n{exc}\n```",
         )
         sys.exit(1)
 
-    # --- Comment back to original issue/MR --------------------------------
+    summary_tail = crush_summary[-2000:] if len(crush_summary) > 2000 else crush_summary
     gl.post_note(
         project_id,
         kind,
         iid,
-        f"🤖 **OpenHands** has created a fix in !{new_mr_iid}: {new_mr_url}\n\n"
-        f"Branch: `{new_branch}`",
+        f"🤖 **Crush** created a fix in !{new_mr_iid}: {new_mr_url}\n\n"
+        f"Branch: `{new_branch}`\n\n"
+        f"### Runner Summary\n\n{summary_tail}",
     )
     logger.info("Fix complete. New MR: %s", new_mr_url)
 
 
 def _branch_has_commits(ws: Workspace, base_branch: str, new_branch: str) -> bool:
     """Return True if new_branch has commits ahead of base_branch."""
-    import subprocess
-
     result = subprocess.run(
         ["git", "rev-list", "--count", f"{base_branch}..{new_branch}"],
         cwd=ws.repo_dir,
@@ -380,39 +563,80 @@ def main() -> None:
     task_kind = _require("TASK_KIND")
     project_id = int(_require("PROJECT_ID"))
     kind = _require("KIND")
-    note_id = int(_require("NOTE_ID"))
 
     mr_iid_str = _optional("MR_IID")
     issue_iid_str = _optional("ISSUE_IID")
     mr_iid: Optional[int] = int(mr_iid_str) if mr_iid_str else None
     issue_iid: Optional[int] = int(issue_iid_str) if issue_iid_str else None
+    crush_user_prompt = _optional("CRUSH_USER_PROMPT")
+
+    crush_base_url = _require_any("CRUSH_BASE_URL", "LLM_BASE_URL")
+    crush_model = _require_any("CRUSH_MODEL", "LLM_MODEL")
+    crush_api_key = _require_any("CRUSH_API_KEY", "LLM_API_KEY")
+    crush_allowed_tools = _parse_allowed_tools(
+        _optional("CRUSH_ALLOWED_TOOLS", DEFAULT_CRUSH_ALLOWED_TOOLS)
+    )
+    crush_timeout_seconds = _parse_int_env(
+        "CRUSH_TIMEOUT_SECONDS", DEFAULT_CRUSH_TIMEOUT_SECONDS
+    )
 
     gl = GitLabClient(
         base_url=_require("GITLAB_BASE_URL"),
         token=_require("GITLAB_TOKEN"),
     )
-    llm = LLMClient(
-        base_url=_require("LLM_BASE_URL"),
-        model=_require("LLM_MODEL"),
-        api_key=_require("LLM_API_KEY"),
-    )
 
     workspace_root = Path(os.environ.get("WORKSPACE_DIR", "/workspace"))
     workspace_root.mkdir(parents=True, exist_ok=True)
+
+    crush_config_path = workspace_root / ".crush-runner-config" / "crush.json"
+    crush_data_dir = workspace_root / ".crush-runner-data"
+    crush_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure crush has provider/tool config available for both review and fix.
+    _write_crush_config(
+        crush_config_path,
+        base_url=crush_base_url,
+        model=crush_model,
+        api_key=crush_api_key,
+        allowed_tools=crush_allowed_tools,
+    )
+
     ws = Workspace(workspace_root)
 
     if task_kind == "review":
         if mr_iid is None:
             logger.error("MR_IID is required for task_kind=review")
             sys.exit(1)
-        run_review(gl, llm, project_id, mr_iid, kind, note_id)
+        run_review(
+            gl,
+            project_id=project_id,
+            mr_iid=mr_iid,
+            crush_user_prompt=crush_user_prompt,
+            crush_model=crush_model,
+            crush_config_path=crush_config_path,
+            crush_data_dir=crush_data_dir,
+            crush_timeout_seconds=crush_timeout_seconds,
+            crush_workdir=workspace_root,
+        )
 
     elif task_kind in ("fix_issue", "fix_mr"):
         iid = issue_iid if task_kind == "fix_issue" else mr_iid
         if iid is None:
             logger.error("IID not set for task_kind=%s", task_kind)
             sys.exit(1)
-        run_fix(gl, llm, ws, project_id, kind, iid, note_id, task_kind)
+        run_fix(
+            gl,
+            ws,
+            project_id=project_id,
+            kind=kind,
+            iid=iid,
+            task_kind=task_kind,
+            crush_user_prompt=crush_user_prompt,
+            crush_model=crush_model,
+            crush_config_path=crush_config_path,
+            crush_data_dir=crush_data_dir,
+            crush_timeout_seconds=crush_timeout_seconds,
+        )
 
     else:
         logger.error("Unknown TASK_KIND: %r", task_kind)

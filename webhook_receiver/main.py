@@ -1,4 +1,4 @@
-"""FastAPI webhook receiver for GitLab @openhands mention automation."""
+"""FastAPI webhook receiver for GitLab @crush mention automation."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="GitLab OpenHands Webhook Receiver", version="1.0.0")
+app = FastAPI(title="GitLab Crush Webhook Receiver", version="1.0.0")
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -65,6 +65,16 @@ def _get_allowed_users() -> Optional[set[str]]:
     if not raw:
         return None
     return {u.strip() for u in raw.split(",") if u.strip()}
+
+
+def _parse_crush_note(note_text: str) -> tuple[str, str]:
+    """Parse a @crush note into (command, full_user_prompt_after_mention)."""
+    after = note_text[len("@crush") :].strip()
+    if not after:
+        return "", ""
+    parts = after.split(None, 1)
+    command = parts[0].lower()
+    return command, after
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +136,9 @@ async def webhook(
         note_text[:120],
     )
 
-    # --- Ignore notes that don't start with @openhands --------------------
-    if not note_text.lower().startswith("@openhands"):
-        return JSONResponse({"status": "ignored", "reason": "not an @openhands mention"})
+    # --- Ignore notes that don't start with @crush --------------------
+    if not note_text.lower().startswith("@crush"):
+        return JSONResponse({"status": "ignored", "reason": "not an @crush mention"})
 
     # --- Allowlist check --------------------------------------------------
     allowed = _get_allowed_users()
@@ -137,7 +147,7 @@ async def webhook(
         return JSONResponse({"status": "ignored", "reason": "user not in allowlist"})
 
     # --- Determine task kind and context ----------------------------------
-    note_lower = note_text.lower()
+    command, user_prompt = _parse_crush_note(note_text)
     noteable_type = payload.object_attributes.noteable_type  # "Issue" or "MergeRequest"
 
     task_kind: Optional[str] = None
@@ -145,7 +155,7 @@ async def webhook(
     issue_iid: Optional[int] = None
     kind: str  # "issue" or "mr" – used for GitLab reactions/notes API
 
-    if note_lower.startswith("@openhands review"):
+    if command == "review":
         if noteable_type != "MergeRequest" or payload.merge_request is None:
             return JSONResponse(
                 {"status": "ignored", "reason": "'review' only works on Merge Requests"}
@@ -154,7 +164,7 @@ async def webhook(
         mr_iid = payload.merge_request.iid
         kind = "mr"
 
-    elif note_lower.startswith("@openhands fix"):
+    elif command == "fix":
         if noteable_type == "MergeRequest" and payload.merge_request is not None:
             task_kind = "fix_mr"
             mr_iid = payload.merge_request.iid
@@ -170,7 +180,7 @@ async def webhook(
 
     else:
         return JSONResponse(
-            {"status": "ignored", "reason": "unrecognized @openhands command"}
+            {"status": "ignored", "reason": "unrecognized @crush command"}
         )
 
     iid = mr_iid if mr_iid is not None else issue_iid
@@ -228,9 +238,13 @@ async def webhook(
         "KIND": kind,
         "GITLAB_BASE_URL": os.environ.get("GITLAB_BASE_URL", ""),
         "GITLAB_TOKEN": os.environ.get("GITLAB_TOKEN", ""),
-        "LLM_BASE_URL": os.environ.get("LLM_BASE_URL", ""),
-        "LLM_MODEL": os.environ.get("LLM_MODEL", ""),
-        "LLM_API_KEY": os.environ.get("LLM_API_KEY", ""),
+        "CRUSH_BASE_URL": os.environ.get("CRUSH_BASE_URL", os.environ.get("LLM_BASE_URL", "")),
+        "CRUSH_MODEL": os.environ.get("CRUSH_MODEL", os.environ.get("LLM_MODEL", "")),
+        "CRUSH_API_KEY": os.environ.get("CRUSH_API_KEY", os.environ.get("LLM_API_KEY", "")),
+        "CRUSH_ALLOWED_TOOLS": os.environ.get("CRUSH_ALLOWED_TOOLS", ""),
+        "CRUSH_TIMEOUT_SECONDS": os.environ.get("CRUSH_TIMEOUT_SECONDS", ""),
+        # Entire text after "@crush", including the command token.
+        "CRUSH_USER_PROMPT": user_prompt,
     }
     if mr_iid is not None:
         env_vars["MR_IID"] = str(mr_iid)
@@ -263,7 +277,7 @@ async def webhook(
                 project_id,
                 kind,
                 iid,
-                f"⚠️ **OpenHands**: Failed to start runner job.\n\n```\n{exc}\n```",
+                f"⚠️ **Crush**: Failed to start runner job.\n\n```\n{exc}\n```",
             )
         except GitLabError as gl_exc:
             logger.warning("Could not post failure note: %s", gl_exc)

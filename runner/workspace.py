@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of characters fed to the LLM for diffs/descriptions.
+# Maximum number of characters fed to the review prompt for diffs/descriptions.
 MAX_DIFF_CHARS = 24_000
 
 
@@ -115,8 +115,8 @@ class Workspace:
         self._repo_dir = dest
 
         # Configure git identity for commits
-        _run(["git", "config", "user.email", "openhands-bot@localhost"], cwd=dest)
-        _run(["git", "config", "user.name", "OpenHands Bot"], cwd=dest)
+        _run(["git", "config", "user.email", "crush-bot@localhost"], cwd=dest)
+        _run(["git", "config", "user.name", "Crush Bot"], cwd=dest)
 
         return dest
 

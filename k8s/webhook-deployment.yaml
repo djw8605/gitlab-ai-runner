@@ -1,35 +1,35 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: openhands-webhook
-  namespace: openhands
+  name: crush-webhook
+  namespace: crush
   labels:
-    app: openhands-webhook
+    app: crush-webhook
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: openhands-webhook
+      app: crush-webhook
   template:
     metadata:
       labels:
-        app: openhands-webhook
+        app: crush-webhook
     spec:
-      serviceAccountName: openhands-webhook
+      serviceAccountName: crush-webhook
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
       containers:
         - name: webhook
-          image: YOUR_REGISTRY/openhands-webhook:latest  # replace with your image
+          image: YOUR_REGISTRY/crush-webhook:latest  # replace with your image
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
           envFrom:
             - configMapRef:
-                name: openhands-config
+                name: crush-config
             - secretRef:
-                name: openhands-secrets
+                name: crush-secrets
           livenessProbe:
             httpGet:
               path: /healthz

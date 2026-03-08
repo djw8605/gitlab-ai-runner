@@ -1,10 +1,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: openhands-webhook
-  namespace: openhands
+  name: crush-webhook
+  namespace: crush
   labels:
-    app: openhands-webhook
+    app: crush-webhook
 rules:
   # Allow the webhook receiver to create, inspect, and clean up Jobs
   - apiGroups: ["batch"]

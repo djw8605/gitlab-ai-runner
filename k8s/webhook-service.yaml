@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: openhands-webhook
-  namespace: openhands
+  name: crush-webhook
+  namespace: crush
   labels:
-    app: openhands-webhook
+    app: crush-webhook
 spec:
   type: ClusterIP
   selector:
-    app: openhands-webhook
+    app: crush-webhook
   ports:
     - name: http
       port: 80
