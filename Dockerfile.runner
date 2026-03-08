@@ -1,0 +1,26 @@
+# Dockerfile.runner – build the ephemeral agent runner Job image
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System dependencies for git operations and optional test runners
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+COPY runner/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy runner application
+COPY runner/ /app/
+
+# Non-root user (uid 1000)
+RUN useradd -m -u 1000 runner
+USER runner
+
+# The entrypoint is invoked by the Kubernetes Job spec as:
+#   python /app/runner.py
+CMD ["python", "/app/runner.py"]

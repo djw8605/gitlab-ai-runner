@@ -1,0 +1,28 @@
+# OPTIONAL – Ingress resource. Uncomment and customise before deploying.
+# This example uses the nginx ingress controller; adjust annotations for your cluster.
+#
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: openhands-webhook
+#   namespace: openhands
+#   annotations:
+#     nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+#     cert-manager.io/cluster-issuer: "letsencrypt-prod"  # remove if not using cert-manager
+# spec:
+#   ingressClassName: nginx
+#   tls:
+#     - hosts:
+#         - openhands-webhook.example.com  # replace with your domain
+#       secretName: openhands-webhook-tls
+#   rules:
+#     - host: openhands-webhook.example.com
+#       http:
+#         paths:
+#           - path: /webhook
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: openhands-webhook
+#                 port:
+#                   number: 80
