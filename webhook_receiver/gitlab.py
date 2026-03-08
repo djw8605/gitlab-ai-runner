@@ -40,24 +40,38 @@ class GitLabClient:
 
     def _post(self, path: str, json: dict) -> dict:
         url = self._api(path)
-        resp = httpx.post(
-            url,
-            headers=self._headers,
-            json=json,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
+        try:
+            resp = httpx.post(
+                url,
+                headers=self._headers,
+                json=json,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("GitLab POST %s failed: %s", url, exc.response.text)
+            raise GitLabError(f"GitLab POST failed: {url}") from exc
+        except httpx.RequestError as exc:
+            logger.error("GitLab POST %s failed: %s", url, exc)
+            raise GitLabError(f"GitLab POST failed: {url}") from exc
         return resp.json()
 
     def _get(self, path: str, params: Optional[dict] = None) -> dict | list:
         url = self._api(path)
-        resp = httpx.get(
-            url,
-            headers=self._headers,
-            params=params,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
+        try:
+            resp = httpx.get(
+                url,
+                headers=self._headers,
+                params=params,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("GitLab GET %s failed: %s", url, exc.response.text)
+            raise GitLabError(f"GitLab GET failed: {url}") from exc
+        except httpx.RequestError as exc:
+            logger.error("GitLab GET %s failed: %s", url, exc)
+            raise GitLabError(f"GitLab GET failed: {url}") from exc
         return resp.json()
 
     # ------------------------------------------------------------------
@@ -120,6 +134,14 @@ class GitLabClient:
                 emoji_name,
                 note_id,
                 exc.response.text,
+            )
+            raise GitLabError(f"Could not add reaction {emoji_name!r}: {exc}") from exc
+        except httpx.RequestError as exc:
+            logger.error(
+                "Failed to add reaction %r to note %d: %s",
+                emoji_name,
+                note_id,
+                exc,
             )
             raise GitLabError(f"Could not add reaction {emoji_name!r}: {exc}") from exc
 

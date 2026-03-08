@@ -70,7 +70,7 @@ gitlab-ai-runner/
 │   ├── rolebinding.yaml
 │   ├── webhook-deployment.yaml
 │   ├── webhook-service.yaml
-│   ├── webhook-ingress.yaml  # optional – disabled by default
+│   ├── webhook-ingress.yaml  # optional – apply separately
 │   ├── configmap.yaml        # legacy static manifest (optional)
 │   └── secrets.yaml          # legacy static manifest (optional)
 └── README.md
@@ -153,7 +153,7 @@ Then update `k8s/config.env` with your actual `WEBHOOK_IMAGE` and `JOB_IMAGE` va
 
 ```bash
 # 1. Create the namespace (if it doesn't exist)
-kubectl create namespace crush
+kubectl create namespace unl-weitzel
 
 # 2. Set non-secret runtime config
 $EDITOR k8s/config.env
@@ -166,14 +166,14 @@ $EDITOR k8s/secrets.env
 kubectl apply -k k8s
 
 # 5. (Optional) Expose via Ingress
-#    Edit k8s/webhook-ingress.yaml and uncomment the YAML, then:
+#    Adjust the host in k8s/webhook-ingress.yaml if needed, then:
 kubectl apply -f k8s/webhook-ingress.yaml
 ```
 
 Verify the deployment:
 ```bash
-kubectl -n crush rollout status deployment/crush-webhook
-kubectl -n crush get pods
+kubectl -n unl-weitzel rollout status deployment/crush-webhook
+kubectl -n unl-weitzel get pods
 curl http://<SERVICE_IP>/healthz   # should return {"status":"ok"}
 ```
 
@@ -187,7 +187,7 @@ curl http://<SERVICE_IP>/healthz   # should return {"status":"ok"}
 
 | Field | Value |
 |-------|-------|
-| URL | `https://crush-webhook.example.com/webhook` |
+| URL | `https://crush-webhook-unl-weitzel.nrp-nautilus.io/webhook` |
 | Secret token | The value you set as `WEBHOOK_SECRET` in `k8s/secrets.env` |
 | Trigger | ☑️ **Comments** (Note events) |
 
@@ -292,9 +292,15 @@ The runner:
 ### Webhook receiver returns 422
 - The payload could not be parsed. Check that the **Trigger** is set to **Comments** only, not Merge Requests or Issues separately.
 
+### Webhook receiver returns 500 with `No address associated with hostname`
+- `GITLAB_BASE_URL` is not resolvable from the webhook pod.
+- Verify DNS from inside the namespace (example):
+  - `kubectl -n unl-weitzel exec deploy/crush-webhook -- getent hosts gitlab.nrp-nautilus.io`
+- If GitLab is in-cluster, prefer an internal service URL for `GITLAB_BASE_URL` (for example, `http://<gitlab-service>.<namespace>.svc.cluster.local`).
+
 ### No 👀 reaction appears
 - Check that `GITLAB_TOKEN` has the `api` scope.
-- Check receiver logs: `kubectl -n crush logs deploy/crush-webhook`
+- Check receiver logs: `kubectl -n unl-weitzel logs deploy/crush-webhook`
 - Verify the bot account has at least **Reporter** access to the project.
 
 ### Job is created but no 🚀 reaction
@@ -302,7 +308,7 @@ The runner:
 - The bot account may lack permission to add reactions (needs **Reporter** or higher).
 
 ### Runner Job fails / no MR created
-- Fetch Job logs: `kubectl -n crush logs job/<job-name>`
+- Fetch Job logs: `kubectl -n unl-weitzel logs job/<job-name>`
 - Common causes:
   - `GITLAB_TOKEN` lacks `write_repository` scope → push fails.
   - `crush` provider configuration invalid or unreachable → check `CRUSH_BASE_URL`, `CRUSH_MODEL`, and `CRUSH_API_KEY`.
@@ -314,9 +320,9 @@ The runner:
 
 ### Checking runner Job status
 ```bash
-kubectl -n crush get jobs
-kubectl -n crush describe job <job-name>
-kubectl -n crush logs job/<job-name>
+kubectl -n unl-weitzel get jobs
+kubectl -n unl-weitzel describe job <job-name>
+kubectl -n unl-weitzel logs job/<job-name>
 ```
 
 Runner logs include streamed `crush` stdout/stderr lines (prefixed as `crush stdout | ...` / `crush stderr | ...`), including the final `## Thinking` and `## Files Changed` sections from batch mode output.
