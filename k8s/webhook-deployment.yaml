@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openhands-webhook
+  namespace: openhands
+  labels:
+    app: openhands-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openhands-webhook
+  template:
+    metadata:
+      labels:
+        app: openhands-webhook
+    spec:
+      serviceAccountName: openhands-webhook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: webhook
+          image: YOUR_REGISTRY/openhands-webhook:latest  # replace with your image
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: openhands-config
+            - secretRef:
+                name: openhands-secrets
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
