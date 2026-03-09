@@ -39,16 +39,6 @@ MAX_NOTE_BODY_CHARS = 1200
 MAX_NOTES_CONTEXT_CHARS = 16000
 CRUSH_STDIO_TAIL_LINES = 30
 NO_FILE_EDITS_MARKER = "NO_FILE_EDITS_NEEDED:"
-PLANNING_LOOP_MARKERS = (
-    "## current state",
-    "## files & changes",
-    "## todo list status",
-    "for the resuming assistant",
-    "todos tool",
-    "## technical context",
-    "## strategy & approach",
-    "## exact next steps",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +227,8 @@ def _run_crush(
 
     stdout_buf: list[str] = []
     stderr_buf: list[str] = []
-    planning_violation: Optional[str] = None
 
     def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
-        nonlocal planning_violation
         if stream is None:
             return
         # line-buffered stream copy so crush output appears in pod logs.
@@ -249,18 +237,6 @@ def _run_crush(
             text = line.rstrip()
             if text:
                 logger.info("crush %s | %s", prefix, text)
-                if prefix == "stdout" and planning_violation is None:
-                    lowered = text.lower()
-                    for marker in PLANNING_LOOP_MARKERS:
-                        if marker in lowered:
-                            planning_violation = marker
-                            logger.error(
-                                "Detected planning-only crush output marker %r; terminating run",
-                                marker,
-                            )
-                            if proc.poll() is None:
-                                proc.terminate()
-                            break
         stream.close()
 
     out_thread = threading.Thread(
@@ -295,14 +271,6 @@ def _run_crush(
     stderr_tail = _tail_lines(stderr)
     logger.info("Crush stdout tail:\n%s", stdout_tail or "<empty>")
     logger.info("Crush stderr tail:\n%s", stderr_tail or "<empty>")
-
-    if planning_violation is not None:
-        detail = stderr[-3000:] if stderr else stdout[-3000:]
-        raise RuntimeError(
-            "crush produced planning-only output "
-            f"(marker: {planning_violation!r}) and was terminated. "
-            f"Output tail:\n{detail}"
-        )
 
     if result_code != 0:
         detail = stderr[-3000:] if stderr else stdout[-3000:]
