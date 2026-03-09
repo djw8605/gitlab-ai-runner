@@ -31,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger("runner")
 
 DEFAULT_OPENCODE_TIMEOUT_SECONDS = 1800
+DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS = 128000
 DEFAULT_OPENCODE_MAX_OUTPUT_TOKENS = 100000
 MAX_CONTEXT_NOTES = 30
 MAX_NOTE_BODY_CHARS = 1200
@@ -126,6 +127,7 @@ def _write_opencode_config(
     base_url: str,
     model: str,
     api_key: str,
+    max_context_tokens: int,
     max_output_tokens: int,
 ) -> None:
     """Write a project-local opencode.json for deterministic non-interactive runs."""
@@ -143,7 +145,10 @@ def _write_opencode_config(
                 "models": {
                     model: {
                         "name": model,
-                        "limit": {"output": max_output_tokens},
+                        "limit": {
+                            "context": max_context_tokens,
+                            "output": max_output_tokens,
+                        },
                     }
                 },
             }
@@ -638,6 +643,17 @@ def main() -> None:
         ("OPENCODE_TIMEOUT_SECONDS", "CRUSH_TIMEOUT_SECONDS"),
         DEFAULT_OPENCODE_TIMEOUT_SECONDS,
     )
+    opencode_max_context_tokens = _parse_int_env_any(
+        ("OPENCODE_MAX_CONTEXT_TOKENS",),
+        DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS,
+    )
+    if opencode_max_context_tokens < 1:
+        logger.warning(
+            "Invalid OPENCODE_MAX_CONTEXT_TOKENS=%d, using default %d",
+            opencode_max_context_tokens,
+            DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS,
+        )
+        opencode_max_context_tokens = DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS
     opencode_max_output_tokens = _parse_int_env_any(
         ("OPENCODE_MAX_OUTPUT_TOKENS", "CRUSH_MAX_TOKENS"),
         DEFAULT_OPENCODE_MAX_OUTPUT_TOKENS,
@@ -667,6 +683,7 @@ def main() -> None:
         base_url=opencode_base_url,
         model=opencode_model,
         api_key=opencode_api_key,
+        max_context_tokens=opencode_max_context_tokens,
         max_output_tokens=opencode_max_output_tokens,
     )
 

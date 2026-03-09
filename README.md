@@ -261,6 +261,7 @@ Then the runner:
 | `OPENCODE_MODEL` | ConfigMap | Model name exposed by your provider |
 | `OPENCODE_API_KEY` | Secret | API key for the provider (any string if auth is disabled) |
 | `OPENCODE_TIMEOUT_SECONDS` | ConfigMap | Timeout for each opencode invocation (default: `1800`) |
+| `OPENCODE_MAX_CONTEXT_TOKENS` | ConfigMap | Context token limit written into opencode provider config (default: `128000`) |
 | `OPENCODE_MAX_OUTPUT_TOKENS` | ConfigMap | Max output tokens in opencode config (default: `4096`) |
 | `ALLOWED_USERS` | ConfigMap | Comma-separated GitLab usernames; empty = allow all |
 | `JOB_TTL_SECONDS` | ConfigMap | Job TTL after completion (default: `1800`) |
@@ -283,6 +284,7 @@ Then the runner:
 | `OPENCODE_MODEL` | Passed through from receiver |
 | `OPENCODE_API_KEY` | Passed through from receiver |
 | `OPENCODE_TIMEOUT_SECONDS` | Passed through from receiver |
+| `OPENCODE_MAX_CONTEXT_TOKENS` | Passed through from receiver |
 | `OPENCODE_MAX_OUTPUT_TOKENS` | Passed through from receiver |
 | `OPENCODE_USER_PROMPT` | Entire text after `@crush` from the triggering comment |
 | `PRECREATED_MR_IID` | For issue fixes: MR IID prepared by webhook |

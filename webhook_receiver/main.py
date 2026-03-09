@@ -325,6 +325,10 @@ async def webhook(
             "OPENCODE_TIMEOUT_SECONDS",
             os.environ.get("CRUSH_TIMEOUT_SECONDS", ""),
         ),
+        "OPENCODE_MAX_CONTEXT_TOKENS": os.environ.get(
+            "OPENCODE_MAX_CONTEXT_TOKENS",
+            "",
+        ),
         "OPENCODE_MAX_OUTPUT_TOKENS": os.environ.get(
             "OPENCODE_MAX_OUTPUT_TOKENS",
             os.environ.get("CRUSH_MAX_TOKENS", ""),
