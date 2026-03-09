@@ -178,17 +178,22 @@ def _run_crush(
     timeout_seconds: int,
 ) -> str:
     """Execute crush in non-interactive mode, stream logs, and return stdout."""
-    cmd = [
+    base_prefix = [
         "crush",
-        "--yolo",
         "--cwd",
         str(cwd),
         "--data-dir",
         str(data_dir),
-        "run",
-        "--quiet",
-        "--model",
-        f"local/{model}",
+    ]
+    # Crush CLI flag compatibility across versions:
+    # - newer:   crush ... run --yolo
+    # - some:    crush -y ...
+    # - older:   crush --yolo ...
+    cmd_candidates = [
+        [*base_prefix, "run", "--quiet", "--yolo", "--model", f"local/{model}"],
+        ["crush", "-y", "--cwd", str(cwd), "--data-dir", str(data_dir), "run", "--quiet", "--model", f"local/{model}"],
+        ["crush", "--yolo", "--cwd", str(cwd), "--data-dir", str(data_dir), "run", "--quiet", "--model", f"local/{model}"],
+        [*base_prefix, "run", "--quiet", "--model", f"local/{model}"],
     ]
     logger.info("Running crush in %s", cwd)
 
@@ -197,67 +202,88 @@ def _run_crush(
     env["CRUSH_GLOBAL_CONFIG"] = str(config_path)
     env["CRUSH_GLOBAL_DATA"] = str(data_dir)
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+    def _is_unknown_yolo_flag(text: str) -> bool:
+        lowered = text.lower()
+        return (
+            "unknown flag: --yolo" in lowered
+            or "unknown flag: -y" in lowered
+            or "unknown shorthand flag: 'y'" in lowered
         )
-    except FileNotFoundError as exc:
-        raise RuntimeError("crush binary not found in runner image") from exc
 
-    stdout_buf: list[str] = []
-    stderr_buf: list[str] = []
+    def _run_once(cmd: list[str]) -> tuple[int, str, str]:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("crush binary not found in runner image") from exc
 
-    def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
-        if stream is None:
-            return
-        # line-buffered stream copy so crush output appears in pod logs.
-        for line in iter(stream.readline, ""):
-            buf.append(line)
-            text = line.rstrip()
-            if text:
-                logger.info("crush %s | %s", prefix, text)
-        stream.close()
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
 
-    out_thread = threading.Thread(
-        target=_pump, args=(proc.stdout, "stdout", stdout_buf), daemon=True
-    )
-    err_thread = threading.Thread(
-        target=_pump, args=(proc.stderr, "stderr", stderr_buf), daemon=True
-    )
-    out_thread.start()
-    err_thread.start()
+        def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
+            if stream is None:
+                return
+            # line-buffered stream copy so crush output appears in pod logs.
+            for line in iter(stream.readline, ""):
+                buf.append(line)
+                text = line.rstrip()
+                if text:
+                    logger.info("crush %s | %s", prefix, text)
+            stream.close()
 
-    try:
-        if proc.stdin is not None:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
-        result_code = proc.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        raise RuntimeError(f"crush timed out after {timeout_seconds}s") from exc
-    finally:
-        out_thread.join()
-        err_thread.join()
+        out_thread = threading.Thread(
+            target=_pump, args=(proc.stdout, "stdout", stdout_buf), daemon=True
+        )
+        err_thread = threading.Thread(
+            target=_pump, args=(proc.stderr, "stderr", stderr_buf), daemon=True
+        )
+        out_thread.start()
+        err_thread.start()
 
-    stdout = "".join(stdout_buf).strip()
-    stderr = "".join(stderr_buf).strip()
+        try:
+            if proc.stdin is not None:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            result_code = proc.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            raise RuntimeError(f"crush timed out after {timeout_seconds}s") from exc
+        finally:
+            out_thread.join()
+            err_thread.join()
 
-    if result_code != 0:
+        stdout = "".join(stdout_buf).strip()
+        stderr = "".join(stderr_buf).strip()
+        return result_code, stdout, stderr
+
+    last_failure_detail = ""
+    for idx, cmd in enumerate(cmd_candidates, start=1):
+        logger.info("Crush run attempt %d with command: %s", idx, " ".join(cmd))
+        result_code, stdout, stderr = _run_once(cmd)
+        if result_code == 0:
+            if not stdout:
+                raise RuntimeError("crush returned an empty response")
+            return stdout
+
         detail = stderr[-3000:] if stderr else stdout[-3000:]
+        last_failure_detail = detail
+        if _is_unknown_yolo_flag(detail) and idx < len(cmd_candidates):
+            logger.warning(
+                "Crush yolo flag variant unsupported, retrying with next command form"
+            )
+            continue
+
         raise RuntimeError(f"crush failed with exit code {result_code}: {detail}")
 
-    output = stdout
-    if not output:
-        raise RuntimeError("crush returned an empty response")
-
-    return output
+    raise RuntimeError(f"crush failed after trying compatible command variants: {last_failure_detail}")
 
 
 # ---------------------------------------------------------------------------
