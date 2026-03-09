@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -75,6 +76,20 @@ def _parse_crush_note(note_text: str) -> tuple[str, str]:
     parts = after.split(None, 1)
     command = parts[0].lower()
     return command, after
+
+
+def _slugify(text: str, max_len: int = 30) -> str:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = text.strip("-")
+    return text[:max_len].rstrip("-")
+
+
+def _issue_fix_branch(issue_iid: int, title: str) -> str:
+    slug = _slugify(title)
+    if slug:
+        return f"ai/issue-{issue_iid}-{slug}"
+    return f"ai/issue-{issue_iid}"
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +245,62 @@ async def webhook(
             logger.warning("Could not add 'rocket' reaction (existing job): %s", exc)
         return JSONResponse({"status": "already_exists", "job_name": job_name})
 
+    precreated_mr_iid: Optional[int] = None
+    precreated_mr_url: str = ""
+    precreated_mr_branch: str = ""
+    precreated_mr_target_branch: str = ""
+
+    # --- For issue fixes, pre-create branch + MR, then notify the issue ----
+    if task_kind == "fix_issue" and issue_iid is not None and payload.issue is not None:
+        issue_title = payload.issue.title or f"issue-{issue_iid}"
+        target_branch = (payload.project.default_branch or "main").strip() or "main"
+        source_branch = _issue_fix_branch(issue_iid, issue_title)
+        mr_title = f"fix: resolve issue #{issue_iid} - {issue_title}"
+        mr_description = (
+            f"Closes #{issue_iid}\n\n"
+            f"This merge request was automatically created by Crush from issue #{issue_iid}."
+        )
+
+        try:
+            gl.ensure_branch(
+                project_id=project_id,
+                branch=source_branch,
+                ref=target_branch,
+            )
+            mr = gl.ensure_merge_request(
+                project_id=project_id,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                title=mr_title,
+                description=mr_description,
+            )
+            precreated_mr_iid = int(mr.get("iid"))
+            precreated_mr_url = str(mr.get("web_url", ""))
+            precreated_mr_branch = source_branch
+            precreated_mr_target_branch = target_branch
+            mr_ref = (
+                f"[!{precreated_mr_iid}]({precreated_mr_url})"
+                if precreated_mr_url
+                else f"!{precreated_mr_iid}"
+            )
+            gl.post_issue_note(
+                project_id,
+                issue_iid,
+                f"🚧 **Crush**: Creating merge request {mr_ref} to fix this issue.",
+            )
+            logger.info(
+                "Prepared issue fix MR !%s for issue #%s using branch %s",
+                precreated_mr_iid,
+                issue_iid,
+                precreated_mr_branch,
+            )
+        except GitLabError as exc:
+            logger.error("Failed to prepare issue fix MR: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to prepare issue fix MR: {exc}",
+            )
+
     # --- Build env vars for the runner Job --------------------------------
     env_vars: dict[str, str] = {
         "TASK_KIND": task_kind,
@@ -243,6 +314,7 @@ async def webhook(
         "CRUSH_API_KEY": os.environ.get("CRUSH_API_KEY", os.environ.get("LLM_API_KEY", "")),
         "CRUSH_ALLOWED_TOOLS": os.environ.get("CRUSH_ALLOWED_TOOLS", ""),
         "CRUSH_TIMEOUT_SECONDS": os.environ.get("CRUSH_TIMEOUT_SECONDS", ""),
+        "CRUSH_MAX_TOKENS": os.environ.get("CRUSH_MAX_TOKENS", ""),
         # Entire text after "@crush", including the command token.
         "CRUSH_USER_PROMPT": user_prompt,
     }
@@ -250,6 +322,14 @@ async def webhook(
         env_vars["MR_IID"] = str(mr_iid)
     if issue_iid is not None:
         env_vars["ISSUE_IID"] = str(issue_iid)
+    if precreated_mr_iid is not None:
+        env_vars["PRECREATED_MR_IID"] = str(precreated_mr_iid)
+    if precreated_mr_url:
+        env_vars["PRECREATED_MR_URL"] = precreated_mr_url
+    if precreated_mr_branch:
+        env_vars["PRECREATED_MR_BRANCH"] = precreated_mr_branch
+    if precreated_mr_target_branch:
+        env_vars["PRECREATED_MR_TARGET_BRANCH"] = precreated_mr_target_branch
 
     ttl = int(os.environ.get("JOB_TTL_SECONDS", "1800"))
     image = os.environ.get("JOB_IMAGE", "")
@@ -298,5 +378,7 @@ async def webhook(
             "job_name": job_name,
             "task_kind": task_kind,
             "namespace": namespace,
+            "precreated_mr_iid": precreated_mr_iid,
+            "precreated_mr_url": precreated_mr_url,
         }
     )

@@ -124,6 +124,14 @@ class Workspace:
         """Create and checkout a new branch."""
         _run(["git", "checkout", "-b", branch_name], cwd=self.repo_dir)
 
+    def checkout_remote_branch(self, branch_name: str) -> None:
+        """Checkout an existing branch from origin."""
+        _run(["git", "fetch", "origin", branch_name], cwd=self.repo_dir)
+        _run(
+            ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
+            cwd=self.repo_dir,
+        )
+
     def write_file(self, relative_path: str, content: str) -> None:
         """Write content to a file inside the repo."""
         target = self.repo_dir / relative_path

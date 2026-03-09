@@ -32,6 +32,7 @@ logger = logging.getLogger("runner")
 
 DEFAULT_CRUSH_ALLOWED_TOOLS = "view,ls,grep,edit,bash"
 DEFAULT_CRUSH_TIMEOUT_SECONDS = 1800
+DEFAULT_CRUSH_MAX_TOKENS = 4096
 MAX_CONTEXT_NOTES = 30
 MAX_NOTE_BODY_CHARS = 1200
 MAX_NOTES_CONTEXT_CHARS = 16000
@@ -127,6 +128,7 @@ def _write_crush_config(
     model: str,
     api_key: str,
     allowed_tools: list[str],
+    max_tokens: int,
 ) -> None:
     """Write a project-local crush.json so non-interactive runs are deterministic."""
     cfg = {
@@ -149,10 +151,12 @@ def _write_crush_config(
             "large": {
                 "provider": "local",
                 "model": model,
+                "max_tokens": max_tokens,
             },
             "small": {
                 "provider": "local",
                 "model": model,
+                "max_tokens": max_tokens,
             },
         },
         "permissions": {
@@ -391,6 +395,10 @@ def run_fix(
     crush_config_path: Path,
     crush_data_dir: Path,
     crush_timeout_seconds: int,
+    precreated_mr_iid: Optional[int] = None,
+    precreated_mr_url: str = "",
+    precreated_mr_branch: str = "",
+    precreated_mr_target_branch: str = "",
 ) -> None:
     """Fix an issue or MR: let crush edit code, push branch, open MR."""
     logger.info("Starting FIX task (%s) for %s #%d", task_kind, kind, iid)
@@ -401,14 +409,23 @@ def run_fix(
     gitlab_base_url = os.environ.get("GITLAB_BASE_URL", "")
     gitlab_token = os.environ.get("GITLAB_TOKEN", "")
     item_notes: list[dict] = []
+    use_precreated_issue_mr = (
+        task_kind == "fix_issue"
+        and bool(precreated_mr_branch)
+        and precreated_mr_iid is not None
+    )
 
     if task_kind == "fix_issue":
         item = gl.get_issue(project_id, iid)
         item_notes = gl.get_issue_notes(project_id, iid)
         item_title: str = item.get("title", f"Issue #{iid}")
         item_description: str = item.get("description", "")
-        base_branch = default_branch
-        new_branch = ws.issue_branch(iid, item_title)
+        if use_precreated_issue_mr:
+            base_branch = precreated_mr_target_branch or default_branch
+            new_branch = precreated_mr_branch
+        else:
+            base_branch = default_branch
+            new_branch = ws.issue_branch(iid, item_title)
         back_ref = f"issue #{iid}"
         context_label = "Issue Comment Context"
         mr_title = f"fix: resolve issue #{iid} - {item_title}"
@@ -438,7 +455,10 @@ def run_fix(
         token=gitlab_token,
         branch=base_branch,
     )
-    ws.create_branch(new_branch)
+    if use_precreated_issue_mr:
+        ws.checkout_remote_branch(new_branch)
+    else:
+        ws.create_branch(new_branch)
 
     notes_context = _format_notes_context(item_notes)
     user_prompt = crush_user_prompt or "(none)"
@@ -521,6 +541,34 @@ def run_fix(
 
     ws.push(new_branch)
 
+    if use_precreated_issue_mr:
+        if not precreated_mr_url and precreated_mr_iid is not None:
+            mr = gl.get_mr(project_id, precreated_mr_iid)
+            precreated_mr_url = mr.get("web_url", "")
+        mr_ref = (
+            f"[!{precreated_mr_iid}]({precreated_mr_url})"
+            if precreated_mr_iid is not None and precreated_mr_url
+            else f"!{precreated_mr_iid}"
+        )
+        summary_tail = (
+            crush_summary[-2000:] if len(crush_summary) > 2000 else crush_summary
+        )
+        gl.post_issue_note(
+            project_id,
+            iid,
+            f"🤖 **Crush** updated merge request {mr_ref}.\n\n"
+            f"Branch: `{new_branch}`",
+        )
+        if precreated_mr_iid is not None:
+            gl.post_mr_note(
+                project_id,
+                precreated_mr_iid,
+                "🤖 **Crush** updated this merge request from the linked issue.\n\n"
+                f"### Runner Summary\n\n{summary_tail}",
+            )
+        logger.info("Fix complete. Updated existing MR: %s", precreated_mr_url)
+        return
+
     try:
         new_mr = gl.create_merge_request(
             project_id=project_id,
@@ -583,6 +631,13 @@ def main() -> None:
     issue_iid_str = _optional("ISSUE_IID")
     mr_iid: Optional[int] = int(mr_iid_str) if mr_iid_str else None
     issue_iid: Optional[int] = int(issue_iid_str) if issue_iid_str else None
+    precreated_mr_iid_str = _optional("PRECREATED_MR_IID")
+    precreated_mr_iid: Optional[int] = (
+        int(precreated_mr_iid_str) if precreated_mr_iid_str else None
+    )
+    precreated_mr_url = _optional("PRECREATED_MR_URL")
+    precreated_mr_branch = _optional("PRECREATED_MR_BRANCH")
+    precreated_mr_target_branch = _optional("PRECREATED_MR_TARGET_BRANCH")
     crush_user_prompt = _optional("CRUSH_USER_PROMPT")
 
     crush_base_url = _require_any("CRUSH_BASE_URL", "LLM_BASE_URL")
@@ -594,6 +649,14 @@ def main() -> None:
     crush_timeout_seconds = _parse_int_env(
         "CRUSH_TIMEOUT_SECONDS", DEFAULT_CRUSH_TIMEOUT_SECONDS
     )
+    crush_max_tokens = _parse_int_env("CRUSH_MAX_TOKENS", DEFAULT_CRUSH_MAX_TOKENS)
+    if crush_max_tokens < 1:
+        logger.warning(
+            "Invalid CRUSH_MAX_TOKENS=%d, using default %d",
+            crush_max_tokens,
+            DEFAULT_CRUSH_MAX_TOKENS,
+        )
+        crush_max_tokens = DEFAULT_CRUSH_MAX_TOKENS
 
     gl = GitLabClient(
         base_url=_require("GITLAB_BASE_URL"),
@@ -614,6 +677,7 @@ def main() -> None:
         model=crush_model,
         api_key=crush_api_key,
         allowed_tools=crush_allowed_tools,
+        max_tokens=crush_max_tokens,
     )
 
     ws = Workspace(workspace_root)
@@ -651,6 +715,10 @@ def main() -> None:
             crush_config_path=crush_config_path,
             crush_data_dir=crush_data_dir,
             crush_timeout_seconds=crush_timeout_seconds,
+            precreated_mr_iid=precreated_mr_iid,
+            precreated_mr_url=precreated_mr_url,
+            precreated_mr_branch=precreated_mr_branch,
+            precreated_mr_target_branch=precreated_mr_target_branch,
         )
 
     else:

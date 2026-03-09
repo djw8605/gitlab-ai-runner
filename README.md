@@ -227,16 +227,19 @@ Anything after `@crush` is forwarded to crush as additional prompt text.
 @crush fix prioritize minimal patch, and add regression test
 ```
 
-The runner:
-1. Reads the issue/MR description.
-2. Clones the repository.
-3. Creates a branch:
-   - Issues → `ai/issue-<iid>-<short-slug>`
-   - MRs    → `ai/mr-<iid>-fix`
-4. Runs `crush` in batch mode (`--yolo`) so it can use tools and edit files without interactive permission prompts.
-5. Runs the test suite (pytest / npm test / go test).
-6. If tests pass: commits, pushes, and opens a new MR.
-7. Comments a link back to the original issue/MR.
+For **Issue** fixes, the webhook first:
+1. Creates/reuses branch `ai/issue-<iid>-<short-slug>`.
+2. Creates/reuses a merge request from that branch.
+3. Replies on the issue with the MR link.
+4. Starts the runner against that MR branch.
+
+Then the runner:
+1. Reads the issue/MR context and prompt text.
+2. Clones the repository and checks out the target branch.
+3. Runs `crush` in batch mode so it can use tools and edit files without interactive permission prompts.
+4. Runs the test suite (pytest / npm test / go test).
+5. If tests pass: commits and pushes updates to the existing branch.
+6. Posts update notes back to GitLab.
 
 ---
 
@@ -257,6 +260,7 @@ The runner:
 | `CRUSH_API_KEY` | Secret | API key for the provider (any string if auth is disabled) |
 | `CRUSH_ALLOWED_TOOLS` | ConfigMap | Comma-separated tools auto-allowed in crush config (default: `view,ls,grep,edit,bash`) |
 | `CRUSH_TIMEOUT_SECONDS` | ConfigMap | Timeout for each crush invocation (default: `1800`) |
+| `CRUSH_MAX_TOKENS` | ConfigMap | Max output tokens sent to provider per crush response (default: `4096`) |
 | `ALLOWED_USERS` | ConfigMap | Comma-separated GitLab usernames; empty = allow all |
 | `JOB_TTL_SECONDS` | ConfigMap | Job TTL after completion (default: `1800`) |
 | `JOB_CPU_LIMIT` | ConfigMap | CPU limit for runner Jobs (default: `4`) |
@@ -279,7 +283,12 @@ The runner:
 | `CRUSH_API_KEY` | Passed through from receiver |
 | `CRUSH_ALLOWED_TOOLS` | Passed through from receiver |
 | `CRUSH_TIMEOUT_SECONDS` | Passed through from receiver |
+| `CRUSH_MAX_TOKENS` | Passed through from receiver |
 | `CRUSH_USER_PROMPT` | Entire text after `@crush` from the triggering comment |
+| `PRECREATED_MR_IID` | For issue fixes: MR IID prepared by webhook |
+| `PRECREATED_MR_URL` | For issue fixes: MR URL prepared by webhook |
+| `PRECREATED_MR_BRANCH` | For issue fixes: branch prepared by webhook |
+| `PRECREATED_MR_TARGET_BRANCH` | For issue fixes: MR target branch prepared by webhook |
 
 ---
 
@@ -312,6 +321,7 @@ The runner:
 - Common causes:
   - `GITLAB_TOKEN` lacks `write_repository` scope → push fails.
   - `crush` provider configuration invalid or unreachable → check `CRUSH_BASE_URL`, `CRUSH_MODEL`, and `CRUSH_API_KEY`.
+  - Provider rejects `max_tokens` (for example `max_tokens must be at least 1`) → set `CRUSH_MAX_TOKENS` to a positive integer.
   - Test suite fails → fix the tests or the generated code.
 
 ### Duplicate Jobs

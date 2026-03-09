@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -73,6 +74,27 @@ class GitLabClient:
             logger.error("GitLab GET %s failed: %s", url, exc)
             raise GitLabError(f"GitLab GET failed: {url}") from exc
         return resp.json()
+
+    def _get_optional(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
+        """GET helper that returns None for 404 instead of raising."""
+        url = self._api(path)
+        try:
+            resp = httpx.get(
+                url,
+                headers=self._headers,
+                params=params,
+                timeout=self._timeout,
+            )
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error("GitLab GET %s failed: %s", url, exc.response.text)
+            raise GitLabError(f"GitLab GET failed: {url}") from exc
+        except httpx.RequestError as exc:
+            logger.error("GitLab GET %s failed: %s", url, exc)
+            raise GitLabError(f"GitLab GET failed: {url}") from exc
 
     # ------------------------------------------------------------------
     # Reactions (Emoji awards)
@@ -200,3 +222,74 @@ class GitLabClient:
                 "description": description,
             },
         )
+
+    def list_open_merge_requests_by_source_branch(
+        self, project_id: int, source_branch: str
+    ) -> list[dict]:
+        data = self._get(
+            f"/projects/{project_id}/merge_requests",
+            params={
+                "state": "opened",
+                "source_branch": source_branch,
+                "order_by": "updated_at",
+                "sort": "desc",
+                "per_page": 20,
+            },
+        )
+        return data if isinstance(data, list) else []
+
+    def ensure_merge_request(
+        self,
+        project_id: int,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str = "",
+    ) -> dict:
+        """Create an MR, or return an existing open MR for the same source branch."""
+        existing = self.list_open_merge_requests_by_source_branch(
+            project_id, source_branch
+        )
+        if existing:
+            return existing[0]
+        return self.create_merge_request(
+            project_id=project_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            title=title,
+            description=description,
+        )
+
+    # ------------------------------------------------------------------
+    # Branch helpers
+    # ------------------------------------------------------------------
+
+    def get_branch(self, project_id: int, branch: str) -> Optional[dict]:
+        enc_branch = quote(branch, safe="")
+        return self._get_optional(f"/projects/{project_id}/repository/branches/{enc_branch}")
+
+    def create_branch(self, project_id: int, branch: str, ref: str) -> dict:
+        """Create a branch from ref. Returns branch data."""
+        url = self._api(f"/projects/{project_id}/repository/branches")
+        try:
+            resp = httpx.post(
+                url,
+                headers=self._headers,
+                params={"branch": branch, "ref": ref},
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error("GitLab POST %s failed: %s", url, exc.response.text)
+            raise GitLabError(f"GitLab POST failed: {url}") from exc
+        except httpx.RequestError as exc:
+            logger.error("GitLab POST %s failed: %s", url, exc)
+            raise GitLabError(f"GitLab POST failed: {url}") from exc
+
+    def ensure_branch(self, project_id: int, branch: str, ref: str) -> dict:
+        """Ensure branch exists by creating it if missing."""
+        existing = self.get_branch(project_id, branch)
+        if existing is not None:
+            return existing
+        return self.create_branch(project_id, branch, ref)
