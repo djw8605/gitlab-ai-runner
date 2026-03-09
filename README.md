@@ -267,12 +267,15 @@ Agent selection:
 | `LLM_BASE_URL` | ConfigMap | Preferred shared OpenAI-compatible endpoint including `/v1`; used by all agents |
 | `LLM_MODEL` | ConfigMap | Preferred shared model name used by all agents |
 | `LLM_API_KEY` | Secret | Preferred shared provider API key used by all agents |
+| `LLM_TIMEOUT_SECONDS` | ConfigMap | Preferred shared timeout for all agent invocations (default: `1800`) |
+| `LLM_MAX_CONTEXT_TOKENS` | ConfigMap | Preferred shared context token limit for all agents (example: `200000` for `qwen3`) |
+| `LLM_MAX_OUTPUT_TOKENS` | ConfigMap | Preferred shared max output tokens for all agents |
 | `OPENCODE_BASE_URL` | ConfigMap | OpenAI-compatible endpoint including `/v1`, e.g. `http://vllm:8000/v1` |
 | `OPENCODE_MODEL` | ConfigMap | Model name exposed by your provider |
 | `OPENCODE_API_KEY` | Secret | Legacy fallback API key for compatibility (any string if auth is disabled) |
 | `OPENCODE_TIMEOUT_SECONDS` | ConfigMap | Timeout for each opencode invocation (default: `1800`) |
-| `OPENCODE_MAX_CONTEXT_TOKENS` | ConfigMap | Context token limit written into opencode provider config (default: `128000`) |
-| `OPENCODE_MAX_OUTPUT_TOKENS` | ConfigMap | Max output tokens in opencode config (default: `4096`) |
+| `OPENCODE_MAX_CONTEXT_TOKENS` | ConfigMap | Legacy context token fallback written into opencode provider config (default: `128000`) |
+| `OPENCODE_MAX_OUTPUT_TOKENS` | ConfigMap | Legacy max output token fallback in opencode config (default: `100000`) |
 | `ALLOWED_USERS` | ConfigMap | Comma-separated GitLab usernames; empty = allow all |
 | `JOB_TTL_SECONDS` | ConfigMap | Job TTL after completion (default: `1800`) |
 | `JOB_CPU_LIMIT` | ConfigMap | CPU limit for runner Jobs (default: `4`) |
@@ -293,6 +296,9 @@ Agent selection:
 | `LLM_BASE_URL` | Passed through from receiver |
 | `LLM_MODEL` | Passed through from receiver |
 | `LLM_API_KEY` | Passed through from receiver |
+| `LLM_TIMEOUT_SECONDS` | Passed through from receiver |
+| `LLM_MAX_CONTEXT_TOKENS` | Passed through from receiver |
+| `LLM_MAX_OUTPUT_TOKENS` | Passed through from receiver |
 | `GITLAB_BASE_URL` | Passed through from receiver |
 | `GITLAB_TOKEN` | Passed through from receiver |
 | `OPENCODE_BASE_URL` | Passed through from receiver |

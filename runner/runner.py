@@ -229,6 +229,31 @@ def _write_kilo_config(
     )
 
 
+def _write_aider_model_metadata(
+    config_path: Path,
+    *,
+    model: str,
+    max_context_tokens: int,
+    max_output_tokens: int,
+) -> None:
+    """Write model metadata so Aider knows context/output limits for custom models."""
+    model_name = model if "/" in model else f"openai/{model}"
+    entry = {
+        "max_tokens": max_output_tokens,
+        "max_input_tokens": max_context_tokens,
+        "max_output_tokens": max_output_tokens,
+        "litellm_provider": "openai",
+        "mode": "chat",
+    }
+    cfg: dict[str, dict[str, object]] = {model_name: dict(entry)}
+    # Keep a plain-model alias for compatibility if model is provided unqualified.
+    if model_name != model:
+        cfg[model] = dict(entry)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote %s", config_path)
+
+
 @dataclass(frozen=True)
 class _AgentExecutionSettings:
     base_url: str
@@ -387,7 +412,12 @@ class _AiderExecutor(_BaseAgentExecutor):
             "--model",
             model,
             "--yes",
+            "--no-fancy-input",
+            "--no-show-model-warnings",
+            "--no-check-update",
             "--no-auto-commits",
+            "--model-metadata-file",
+            str(self.settings.config_path),
             "--chat-history-file",
             str(chat_history_file),
             "--input-history-file",
@@ -1153,12 +1183,12 @@ def main() -> None:
             max_output_tokens=agent_max_output_tokens,
         )
     elif coding_agent == "aider":
-        # Aider is configured through env vars and CLI flags.
-        agent_config_path = workspace_root / ".aider-runner-config" / "aider.env"
-        agent_config_path.parent.mkdir(parents=True, exist_ok=True)
-        agent_config_path.write_text(
-            "# aider uses OPENAI_API_BASE/OPENAI_API_KEY\n",
-            encoding="utf-8",
+        agent_config_path = workspace_root / ".aider-runner-config" / "model-metadata.json"
+        _write_aider_model_metadata(
+            agent_config_path,
+            model=agent_model,
+            max_context_tokens=agent_max_context_tokens,
+            max_output_tokens=agent_max_output_tokens,
         )
     else:
         agent_config_path = workspace_root / ".opencode-runner-config" / "opencode.json"

@@ -11,6 +11,8 @@ RUN apt-get update && \
         curl \
         ca-certificates \
         bash \
+        binutils \
+        pandoc \
         nodejs \
         npm \
     && python -m pip install --no-cache-dir aider-install \
