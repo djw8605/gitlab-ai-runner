@@ -492,7 +492,56 @@ def run_fix(
            - Follow existing code patterns and style
            - Fix any syntax errors you create IMMEDIATELY
 
-        STEP 3: INSTALL DEPENDENCIES (ABSOLUTELY MANDATORY - NO EXCEPTIONS)
+        STEP 3: UPDATE .gitignore (MANDATORY FOR NEW PROJECTS/DIRECTORIES)
+        -------------------------------------------------------------------
+           When creating new project directories or adding new tooling, ALWAYS update .gitignore:
+           
+           Node.js/Next.js projects - Add to .gitignore:
+           → node_modules/
+           → .next/
+           → out/
+           → dist/
+           → build/
+           → .env*.local
+           → *.log
+           
+           Python projects - Add to .gitignore:
+           → __pycache__/
+           → *.pyc
+           → *.pyo
+           → *.pyd
+           → .Python
+           → venv/
+           → 5nv/
+           → .venv/
+           → *.egg-info/
+           → dist/
+           → build/
+           
+           Go projects - Add to .gitignore:
+           → /bin/
+           → /pkg/
+           → *.exe
+           → *.test
+           
+           Rust projects - Add to .gitignore:
+           → /target/
+           → Cargo.lock (for libraries)
+           
+           General - Add to .gitignore:
+           → .DS_Store
+           → .idea/
+           → .vscode/ (unless project-specific settings)
+           → *.swp
+           → *.swo
+           
+           ⚠️ IMPORTANT:
+           - Create .gitignore if it doesn't exist
+           - Append entries if .gitignore already exists (don't overwrite)
+           - Check if entries already exist before adding duplicates
+           - Place .gitignore in the appropriate directory (project root or subdirectory)
+
+        STEP 4: INSTALL DEPENDENCIES (ABSOLUTELY MANDATORY - NO EXCEPTIONS)
         --------------------------------------------------------------------
            Python projects:
            → cd to the directory with requirements.txt
@@ -537,7 +586,7 @@ def run_fix(
            
            ⛔ DO NOT PROCEED WITHOUT RUNNING AND SHOWING VALIDATION OUTPUT ⛔
 
-        STEP 5: FIX ALL ERRORS - ITERATE UNTIL SUCCESSFUL
+        STEP 6: FIX ALL ERRORS - ITERATE UNTIL SUCCESSFUL
         --------------------------------------------------
            If validation fails (TypeScript errors, build errors, test failures, etc.):
            
@@ -563,7 +612,7 @@ def run_fix(
            ⛔ DO NOT SAY "Let me fix it" AND THEN EXIT ⛔
            ⛔ ACTUALLY FIX IT AND RERUN THE COMMAND ⛔
 
-        STEP 6: REPORT VALIDATION SUCCESS
+        STEP 7: REPORT VALIDATION SUCCESS
         ----------------------------------
            After ALL validation passes:
            - Show the successful command output
@@ -579,6 +628,7 @@ def run_fix(
         ❌ THINGS THAT WILL CAUSE TASK FAILURE ❌
         ═══════════════════════════════════════════════════════════════════════════════
         
+        ✗ Skipping .gitignore updates for new projects
         ✗ Skipping dependency installation
         ✗ Skipping smoke tests
         ✗ Acknowledging errors exist but not fixing them
@@ -591,7 +641,8 @@ def run_fix(
         ✅ TASK COMPLETION CHECKLIST ✅
         ═══════════════════════════════════════════════════════════════════════════════
         
-        Before you finish, verify you have:
+        BeUpdated .gitignore with necessary exclusions (node_modules/, __pycache__/, etc.)
+        □ fore you finish, verify you have:
         □ Installed all dependencies (npm install, pip install, etc.)
         □ Run at least one validation command (build/test/compile)
         □ Fixed ALL errors that appeared during validation
