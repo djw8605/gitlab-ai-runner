@@ -178,22 +178,13 @@ def _run_crush(
     timeout_seconds: int,
 ) -> str:
     """Execute crush in non-interactive mode, stream logs, and return stdout."""
-    base_prefix = [
-        "crush",
-        "--cwd",
-        str(cwd),
-        "--data-dir",
-        str(data_dir),
-    ]
-    # Crush CLI flag compatibility across versions:
-    # - newer:   crush ... run --yolo
-    # - some:    crush -y ...
-    # - older:   crush --yolo ...
+    # CLI shape per `crush -h`:
+    #   crush -y -c <cwd> -D <data-dir> run "<prompt>"
+    # Keep a small fallback matrix for yolo/cwd/data-dir flag spellings.
     cmd_candidates = [
-        [*base_prefix, "run", "--quiet", "--yolo", "--model", f"local/{model}"],
-        ["crush", "-y", "--cwd", str(cwd), "--data-dir", str(data_dir), "run", "--quiet", "--model", f"local/{model}"],
-        ["crush", "--yolo", "--cwd", str(cwd), "--data-dir", str(data_dir), "run", "--quiet", "--model", f"local/{model}"],
-        [*base_prefix, "run", "--quiet", "--model", f"local/{model}"],
+        ["crush", "-y", "-c", str(cwd), "-D", str(data_dir), "run", prompt],
+        ["crush", "--yolo", "--cwd", str(cwd), "--data-dir", str(data_dir), "run", prompt],
+        ["crush", "-c", str(cwd), "-D", str(data_dir), "run", prompt],
     ]
     logger.info("Running crush in %s", cwd)
 
@@ -217,7 +208,7 @@ def _run_crush(
                 cmd,
                 cwd=cwd,
                 env=env,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -250,9 +241,6 @@ def _run_crush(
         err_thread.start()
 
         try:
-            if proc.stdin is not None:
-                proc.stdin.write(prompt)
-                proc.stdin.close()
             result_code = proc.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             proc.kill()
