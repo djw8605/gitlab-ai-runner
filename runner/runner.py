@@ -470,75 +470,141 @@ def run_fix(
         f"""\
         You are operating inside a Linux container with a git repository.
 
-        ⚠️ CRITICAL EXECUTION AND VALIDATION REQUIREMENTS ⚠️
+        ⚠️⚠️⚠️ CRITICAL EXECUTION AND VALIDATION REQUIREMENTS ⚠️⚠️⚠️
 
-        You MUST complete ALL of these steps in order. The task is NOT complete until validation passes.
+        READ THIS CAREFULLY: The task is NOT complete until ALL steps are done and validation PASSES.
+        You MUST complete this ENTIRE workflow. DO NOT exit or stop until validation succeeds.
 
-        1. ANALYZE THE PROJECT:
+        ═══════════════════════════════════════════════════════════════════════════════
+        MANDATORY WORKFLOW - EXECUTE EVERY STEP IN ORDER:
+        ═══════════════════════════════════════════════════════════════════════════════
+
+        STEP 1: ANALYZE THE PROJECT
+        ----------------------------
            - Examine package.json, requirements.txt, Cargo.toml, go.mod, or other dependency files
            - Identify the project type (Node.js, Python, Go, Rust, etc.)
-           - Check for existing test scripts and build commands in package.json, Makefile, or CI configs
+           - Check for build commands in package.json, Makefile, or CI configs
+           - Note: If creating new directories (e.g., frontend/), remember to cd into them
 
-        2. IMPLEMENT THE REQUESTED CHANGES:
+        STEP 2: IMPLEMENT THE REQUESTED CHANGES
+        ----------------------------------------
            - Make concrete file edits to address the task
            - Follow existing code patterns and style
+           - Fix any syntax errors you create IMMEDIATELY
 
-        3. INSTALL DEPENDENCIES (MANDATORY):
-           - Python projects: Run `pip install -r requirements.txt` or `pip install -e .`
-           - Node.js/Next.js: Run `npm install` or `yarn install`
-           - Go projects: Run `go mod download`
-           - Rust projects: Run `cargo fetch`
-           - NEVER skip this step, even if you think dependencies are already installed
-
-        4. RUN SMOKE TESTS (MANDATORY - DO NOT SKIP):
-           You MUST run at least one validation command appropriate to the project type:
+        STEP 3: INSTALL DEPENDENCIES (ABSOLUTELY MANDATORY - NO EXCEPTIONS)
+        --------------------------------------------------------------------
+           Python projects:
+           → cd to the directory with requirements.txt
+           → Run: pip install -r requirements.txt
            
-           For Node.js/Next.js projects:
-           - Run `npm run build` to verify the build succeeds
-           - Run `npm run dev` or `npm start` with a 10-second timeout to verify it starts
-           - Run `npm test` if tests exist
+           Node.js/Next.js projects:
+           → cd to the directory with package.json
+           → Run: npm install
+           → If you created a new frontend/ directory, run: cd frontend && npm install
+           
+           Go projects:
+           → Run: go mod download
+           
+           Rust projects:
+           → Run: cargo fetch
+           
+           ⛔ NEVER SKIP DEPENDENCY INSTALLATION ⛔
+           Even if you think deps are installed, ALWAYS run the install command.
+
+        STEP 4: RUN SMOKE TESTS (ABSOLUTELY MANDATORY - NO EXCEPTIONS)
+        ---------------------------------------------------------------
+           You MUST run validation commands and show their output. Choose appropriate commands:
+           
+           For Node.js/Next.js projects (EXECUTE ALL OF THESE):
+           → cd to the directory with package.json
+           → Run: npm run build
+           → Check if build succeeded (exit code 0)
+           → If TypeScript errors appear, FIX THEM and rerun npm run build
+           → Show the full build output
            
            For Python projects:
-           - Run `python -m pytest` if tests exist
-           - Run `python -m py_compile <changed_files>` to verify syntax
-           - Import the module: `python -c "import module_name"` to verify it loads
+           → Run: python -m pytest (if tests exist)
+           → Run: python -m py_compile <changed_files>
+           → Run: python -c "import module_name" to verify imports
            
            For Go projects:
-           - Run `go build ./...` to verify compilation
-           - Run `go test ./...` if tests exist
+           → Run: go build ./...
+           → Run: go test ./... (if tests exist)
            
            For Docker projects:
-           - Run `docker build -f Dockerfile .` to verify the image builds
+           → Run: docker build -f Dockerfile .
            
-           For any project:
-           - Run any start/serve command briefly to verify it launches
-           - Execute relevant CLI commands to verify functionality
-           - Run linters or formatters if configured (eslint, black, rustfmt, etc.)
+           ⛔ DO NOT PROCEED WITHOUT RUNNING AND SHOWING VALIDATION OUTPUT ⛔
 
-        5. HANDLE FAILURES:
-           - If ANY validation command fails, analyze the error output
-           - Fix the issue (install missing packages, fix syntax errors, update configs)
-           - Rerun the validation command to confirm the fix works
-           - Repeat until validation passes
+        STEP 5: FIX ALL ERRORS - ITERATE UNTIL SUCCESSFUL
+        --------------------------------------------------
+           If validation fails (TypeScript errors, build errors, test failures, etc.):
+           
+           🔄 REQUIRED FIX LOOP:
+           a) Read and analyze the error message carefully
+           b) Identify the root cause (missing types, syntax errors, wrong imports, etc.)
+           c) Make the necessary fix to the code
+           d) Rerun the exact same validation command
+           e) Verify it now passes (exit code 0, no errors)
+           f) If it still fails, repeat steps a-e until it succeeds
+           
+           Example fix cycle for TypeScript errors:
+           ```
+           $ npm run build
+           ERROR: Type 'string | undefined' is not assignable to type 'string'
+           
+           [Fix the type error in the code]
+           
+           $ npm run build
+           ✓ Compiled successfully
+           ```
+           
+           ⛔ DO NOT SAY "Let me fix it" AND THEN EXIT ⛔
+           ⛔ ACTUALLY FIX IT AND RERUN THE COMMAND ⛔
 
-        6. REPORT RESULTS:
-           - Show the output of all validation commands you ran
-           - If validation cannot run (missing external services, network, credentials), 
-             state EXACTLY what blocked it and what would be needed to validate
-           - Do NOT say validation passed without showing actual command output
+        STEP 6: REPORT VALIDATION SUCCESS
+        ----------------------------------
+           After ALL validation passes:
+           - Show the successful command output
+           - Confirm all builds/tests passed
+           - List what you validated (e.g., "Ran npm run build successfully, no TypeScript errors")
+           
+           If validation is blocked (missing network/services):
+           - State EXACTLY what is blocking validation
+           - State what would be needed to validate
+           - This is ONLY acceptable if truly impossible (not just inconvenient)
 
-        ❌ DO NOT:
-           - Skip dependency installation
-           - Skip smoke testing
-           - Assume tests will pass without running them
-           - Commit or push changes (this is handled separately)
+        ═══════════════════════════════════════════════════════════════════════════════
+        ❌ THINGS THAT WILL CAUSE TASK FAILURE ❌
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        ✗ Skipping dependency installation
+        ✗ Skipping smoke tests
+        ✗ Acknowledging errors exist but not fixing them
+        ✗ Saying "let me fix it" and then exiting
+        ✗ Running validation commands that fail and not iterating to fix them
+        ✗ Exiting before showing successful validation output
+        ✗ Assuming validation will pass without actually running commands
 
-        ✅ VALIDATION SUCCESS CRITERIA:
-           - Dependencies are installed
-           - At least one build/test/start command executed successfully
-           - All executed validation commands exited with code 0
-           - Any failures were fixed and retested
+        ═══════════════════════════════════════════════════════════════════════════════
+        ✅ TASK COMPLETION CHECKLIST ✅
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        Before you finish, verify you have:
+        □ Installed all dependencies (npm install, pip install, etc.)
+        □ Run at least one validation command (build/test/compile)
+        □ Fixed ALL errors that appeared during validation
+        □ Rerun validation to confirm errors are fixed
+        □ Shown the successful validation output
+        □ Verified exit codes are 0 for all validation commands
+        
+        If ANY checkbox is unchecked, you are NOT done. Continue working.
 
+        ═══════════════════════════════════════════════════════════════════════════════
+        PROJECT CONTEXT:
+        ═══════════════════════════════════════════════════════════════════════════════
+        
         Project: {path_with_namespace}
         Task kind: {task_kind}
         Target: {back_ref}
