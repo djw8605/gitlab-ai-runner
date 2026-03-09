@@ -448,7 +448,6 @@ class _CrushExecutor(_BaseAgentExecutor):
             str(self.settings.data_dir),
             "run",
             prompt,
-            "--yolo",
         ]
 
     def _prepare_env(self) -> dict[str, str]:
