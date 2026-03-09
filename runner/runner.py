@@ -194,10 +194,24 @@ def _run_crush(
     logger.info("Running crush in %s", cwd)
 
     env = os.environ.copy()
+    crush_home = data_dir / "home"
+    xdg_cache = data_dir / "xdg-cache"
+    xdg_config = data_dir / "xdg-config"
+    xdg_data = data_dir / "xdg-data"
+    crush_home.mkdir(parents=True, exist_ok=True)
+    xdg_cache.mkdir(parents=True, exist_ok=True)
+    xdg_config.mkdir(parents=True, exist_ok=True)
+    xdg_data.mkdir(parents=True, exist_ok=True)
+
     env["CRUSH_DISABLE_METRICS"] = "1"
     # CRUSH_GLOBAL_CONFIG expects a directory; crush appends "/crush.json".
     env["CRUSH_GLOBAL_CONFIG"] = str(config_path.parent)
     env["CRUSH_GLOBAL_DATA"] = str(data_dir)
+    env["HOME"] = str(crush_home)
+    env["XDG_CACHE_HOME"] = str(xdg_cache)
+    env["XDG_CONFIG_HOME"] = str(xdg_config)
+    env["XDG_DATA_HOME"] = str(xdg_data)
+    env.setdefault("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
 
     def _is_unknown_yolo_flag(text: str) -> bool:
