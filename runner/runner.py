@@ -442,13 +442,13 @@ class _CrushExecutor(_BaseAgentExecutor):
     def _build_command(self, *, cwd: Path, prompt: str) -> list[str]:
         return [
             "crush",
-            "-y",
             "-c",
             str(cwd),
             "-D",
             str(self.settings.data_dir),
             "run",
             prompt,
+            "--yolo",
         ]
 
     def _prepare_env(self) -> dict[str, str]:
