@@ -468,6 +468,18 @@ def run_fix(
     user_prompt = opencode_user_prompt or "(none)"
     prompt = textwrap.dedent(
         f"""\
+        You are operating inside a Linux container with a git repository.
+
+        Execution and validation requirements:
+        - Implement concrete file changes for the requested task.
+        - Determine the project tooling from repository files and docs.
+        - Install any missing dependencies required to run changed code.
+        - Run at least one relevant smoke check for what you changed
+          (for example: build, test, start command, health check, or CLI invocation).
+        - If a command fails, fix the issue and rerun checks.
+        - If validation cannot run (missing network/permissions/time), state exactly what blocked it.
+        - Do not commit or push.
+
         Project: {path_with_namespace}
         Task kind: {task_kind}
         Target: {back_ref}

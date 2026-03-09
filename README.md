@@ -237,11 +237,10 @@ Then the runner:
 1. Reads the issue/MR context and prompt text.
 2. Clones the repository and checks out the target branch.
 3. Runs `opencode` in batch mode with OpenAI-compatible custom provider config.
-4. Sends task context directly (no system prompt scaffolding).
-5. Avoids system package installs unless strictly required; prefers repo-local/file-first changes.
-6. Runs the test suite (pytest / npm test / go test) when quick and available.
-7. If tests pass: commits and pushes updates to the existing branch.
-8. Posts update notes back to GitLab.
+4. Uses a generic execution-first prompt that instructs the agent to install required dependencies and run relevant smoke checks for the changes.
+5. Runs the project test suite (pytest / npm test / go test) when quick and available.
+6. If checks pass: commits and pushes updates to the existing branch.
+7. Posts update notes back to GitLab.
 
 ---
 
