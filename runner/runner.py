@@ -198,6 +198,7 @@ def _run_crush(
     # CRUSH_GLOBAL_CONFIG expects a directory; crush appends "/crush.json".
     env["CRUSH_GLOBAL_CONFIG"] = str(config_path.parent)
     env["CRUSH_GLOBAL_DATA"] = str(data_dir)
+    env.setdefault("DEBIAN_FRONTEND", "noninteractive")
 
     def _is_unknown_yolo_flag(text: str) -> bool:
         lowered = text.lower()
@@ -487,6 +488,10 @@ def run_fix(
         - Edit files directly in this working tree.
         - Do not stay in planning mode; make concrete file edits after brief inspection.
         - Use available tools as needed (including bash/edit/view/grep/ls).
+        - You may install missing dependencies/tools required to complete the task.
+        - If runtime tools are missing, install them (for example node, npm, npx, pytest, go toolchain, or repo dependencies).
+        - For system packages on Debian/Ubuntu, use non-interactive apt commands and keep installs minimal.
+        - Prefer project-local dependency installs first, then system-level installs only when needed.
         - Do NOT commit or push.
         - Run relevant tests or checks when possible.
         - Keep your reasoning concise and practical.
@@ -532,6 +537,9 @@ def run_fix(
             1. Make at least one concrete code edit that moves this task forward.
             2. If no safe code change is possible, output exactly:
                {NO_CHANGES_SENTINEL}: <one short reason>
+
+            You may install missing dependencies/tools (including node/npm/npx) if they
+            are required to make a concrete change.
 
             Task kind: {task_kind}
             Project: {path_with_namespace}

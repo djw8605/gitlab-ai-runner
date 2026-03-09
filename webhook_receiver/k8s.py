@@ -95,8 +95,8 @@ def create_job(
             )
         ],
         security_context=client.V1SecurityContext(
-            run_as_non_root=True,
-            run_as_user=1000,
+            run_as_non_root=False,
+            run_as_user=0,
             allow_privilege_escalation=False,
         ),
     )

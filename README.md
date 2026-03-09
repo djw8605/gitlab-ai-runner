@@ -237,9 +237,10 @@ Then the runner:
 1. Reads the issue/MR context and prompt text.
 2. Clones the repository and checks out the target branch.
 3. Runs `crush` in batch mode so it can use tools and edit files without interactive permission prompts.
-4. Runs the test suite (pytest / npm test / go test).
-5. If tests pass: commits and pushes updates to the existing branch.
-6. Posts update notes back to GitLab.
+4. Installs missing tooling/dependencies when needed (for example `node`, `npm`, `npx`, test/build deps).
+5. Runs the test suite (pytest / npm test / go test).
+6. If tests pass: commits and pushes updates to the existing branch.
+7. Posts update notes back to GitLab.
 
 ---
 
