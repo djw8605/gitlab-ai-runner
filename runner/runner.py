@@ -36,7 +36,7 @@ DEFAULT_CRUSH_MAX_TOKENS = 4096
 MAX_CONTEXT_NOTES = 30
 MAX_NOTE_BODY_CHARS = 1200
 MAX_NOTES_CONTEXT_CHARS = 16000
-NO_CHANGES_SENTINEL = "NO_CHANGES_POSSIBLE"
+CRUSH_STDIO_TAIL_LINES = 30
 
 
 # ---------------------------------------------------------------------------
@@ -183,15 +183,10 @@ def _run_crush(
     timeout_seconds: int,
 ) -> str:
     """Execute crush in non-interactive mode, stream logs, and return stdout."""
-    # CLI shape per `crush -h`:
-    #   crush -y -c <cwd> -D <data-dir> run "<prompt>"
-    # Keep a small fallback matrix for yolo/cwd/data-dir flag spellings.
-    cmd_candidates = [
-        ["crush", "-y", "-c", str(cwd), "-D", str(data_dir), "run", prompt],
-        ["crush", "--yolo", "--cwd", str(cwd), "--data-dir", str(data_dir), "run", prompt],
-        ["crush", "-c", str(cwd), "-D", str(data_dir), "run", prompt],
-    ]
+    cmd = ["crush", "-c", str(cwd), "-D", str(data_dir), "run", prompt]
+    display_cmd = [*cmd[:-1], "<prompt>"]
     logger.info("Running crush in %s", cwd)
+    logger.info("Crush command: %s", " ".join(display_cmd))
 
     env = os.environ.copy()
     crush_home = data_dir / "home"
@@ -214,85 +209,75 @@ def _run_crush(
     env.setdefault("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
 
-    def _is_unknown_yolo_flag(text: str) -> bool:
-        lowered = text.lower()
-        return (
-            "unknown flag: --yolo" in lowered
-            or "unknown flag: -y" in lowered
-            or "unknown shorthand flag: 'y'" in lowered
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
         )
+    except FileNotFoundError as exc:
+        raise RuntimeError("crush binary not found in runner image") from exc
 
-    def _run_once(cmd: list[str]) -> tuple[int, str, str]:
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError("crush binary not found in runner image") from exc
+    stdout_buf: list[str] = []
+    stderr_buf: list[str] = []
 
-        stdout_buf: list[str] = []
-        stderr_buf: list[str] = []
+    def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
+        if stream is None:
+            return
+        # line-buffered stream copy so crush output appears in pod logs.
+        for line in iter(stream.readline, ""):
+            buf.append(line)
+            text = line.rstrip()
+            if text:
+                logger.info("crush %s | %s", prefix, text)
+        stream.close()
 
-        def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
-            if stream is None:
-                return
-            # line-buffered stream copy so crush output appears in pod logs.
-            for line in iter(stream.readline, ""):
-                buf.append(line)
-                text = line.rstrip()
-                if text:
-                    logger.info("crush %s | %s", prefix, text)
-            stream.close()
+    out_thread = threading.Thread(
+        target=_pump, args=(proc.stdout, "stdout", stdout_buf), daemon=True
+    )
+    err_thread = threading.Thread(
+        target=_pump, args=(proc.stderr, "stderr", stderr_buf), daemon=True
+    )
+    out_thread.start()
+    err_thread.start()
 
-        out_thread = threading.Thread(
-            target=_pump, args=(proc.stdout, "stdout", stdout_buf), daemon=True
-        )
-        err_thread = threading.Thread(
-            target=_pump, args=(proc.stderr, "stderr", stderr_buf), daemon=True
-        )
-        out_thread.start()
-        err_thread.start()
+    try:
+        result_code = proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        raise RuntimeError(f"crush timed out after {timeout_seconds}s") from exc
+    finally:
+        out_thread.join()
+        err_thread.join()
 
-        try:
-            result_code = proc.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            proc.kill()
-            raise RuntimeError(f"crush timed out after {timeout_seconds}s") from exc
-        finally:
-            out_thread.join()
-            err_thread.join()
+    stdout = "".join(stdout_buf).strip()
+    stderr = "".join(stderr_buf).strip()
+    logger.info("Crush exit code: %d", result_code)
 
-        stdout = "".join(stdout_buf).strip()
-        stderr = "".join(stderr_buf).strip()
-        return result_code, stdout, stderr
+    def _tail_lines(text: str, n: int = CRUSH_STDIO_TAIL_LINES) -> str:
+        if not text:
+            return ""
+        lines = text.splitlines()
+        return "\n".join(lines[-n:])
 
-    last_failure_detail = ""
-    for idx, cmd in enumerate(cmd_candidates, start=1):
-        logger.info("Crush run attempt %d with command: %s", idx, " ".join(cmd))
-        result_code, stdout, stderr = _run_once(cmd)
-        if result_code == 0:
-            if not stdout:
-                raise RuntimeError("crush returned an empty response")
-            return stdout
+    stdout_tail = _tail_lines(stdout)
+    stderr_tail = _tail_lines(stderr)
+    logger.info("Crush stdout tail:\n%s", stdout_tail or "<empty>")
+    logger.info("Crush stderr tail:\n%s", stderr_tail or "<empty>")
 
+    if result_code != 0:
         detail = stderr[-3000:] if stderr else stdout[-3000:]
-        last_failure_detail = detail
-        if _is_unknown_yolo_flag(detail) and idx < len(cmd_candidates):
-            logger.warning(
-                "Crush yolo flag variant unsupported, retrying with next command form"
-            )
-            continue
-
         raise RuntimeError(f"crush failed with exit code {result_code}: {detail}")
 
-    raise RuntimeError(f"crush failed after trying compatible command variants: {last_failure_detail}")
+    if not stdout:
+        raise RuntimeError("crush returned an empty response")
+
+    return stdout
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +296,34 @@ def _format_diff(changes: dict) -> str:
     if len(full) > MAX_DIFF_CHARS:
         full = full[:MAX_DIFF_CHARS] + "\n... [diff truncated] ..."
     return full
+
+
+def _log_post_crush_git_diagnostics(repo_dir: Path) -> None:
+    """Log git status and diff summary after a crush run."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    status_out = (status.stdout or "").strip()
+    logger.info(
+        "Post-crush git status --porcelain:\n%s",
+        status_out if status_out else "<clean>",
+    )
+
+    if status_out:
+        diff_stat = subprocess.run(
+            ["git", "diff", "--stat"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        diff_stat_out = (diff_stat.stdout or "").strip()
+        if diff_stat_out:
+            logger.info("Post-crush git diff --stat:\n%s", diff_stat_out)
 
 
 def run_review(
@@ -481,7 +494,14 @@ def run_fix(
 
     prompt = textwrap.dedent(
         f"""\
-        You are a coding agent operating in batch mode inside this repository.
+        You are operating inside a Linux container with a git repo.
+        Rules:
+        - Do not restate architecture.
+        - Do not produce long plans or todo lists.
+        - Every step must run a shell command or edit a file.
+        - No external tool APIs are available (do not reference todos/tools).
+        - If a command fails, print the exact command and the error output, then stop.
+        - You must modify at least one file before exiting.
 
         Task kind: {task_kind}
         Project: {path_with_namespace}
@@ -500,7 +520,6 @@ def run_fix(
         Instructions:
         - Implement the smallest correct fix for the request.
         - Edit files directly in this working tree.
-        - Do not stay in planning mode; make concrete file edits after brief inspection.
         - Use available tools as needed (including bash/edit/view/grep/ls).
         - You may install missing dependencies/tools required to complete the task.
         - If runtime tools are missing, install them (for example node, npm, npx, pytest, go toolchain, or repo dependencies).
@@ -508,11 +527,7 @@ def run_fix(
         - Prefer project-local dependency installs first, then system-level installs only when needed.
         - Do NOT commit or push.
         - Run relevant tests or checks when possible.
-        - Keep your reasoning concise and practical.
-        - If no safe/code-valid change is possible, output exactly:
-          NO_CHANGES_POSSIBLE: <one short reason>
         - Finish by printing a short Markdown summary with sections:
-          ## Thinking
           ## Summary
           ## Files Changed
           ## Tests Run
@@ -530,6 +545,7 @@ def run_fix(
         )
     except RuntimeError as exc:
         logger.error("Crush fix failed: %s", exc)
+        _log_post_crush_git_diagnostics(ws.repo_dir)
         gl.post_note(
             project_id,
             kind,
@@ -538,65 +554,27 @@ def run_fix(
         )
         sys.exit(1)
 
-    # One retry pass if crush returned without modifying files and did not
-    # explicitly declare no-change feasibility.
-    if not ws.has_changes() and NO_CHANGES_SENTINEL not in crush_summary:
-        logger.info("No file changes detected after first crush pass; running retry pass")
-        retry_timeout_seconds = max(120, min(600, crush_timeout_seconds // 2))
-        retry_prompt = textwrap.dedent(
-            f"""\
-            The previous run did not edit any files.
+    _log_post_crush_git_diagnostics(ws.repo_dir)
 
-            You must now do exactly one of the following:
-            1. Make at least one concrete code edit that moves this task forward.
-            2. If no safe code change is possible, output exactly:
-               {NO_CHANGES_SENTINEL}: <one short reason>
-
-            You may install missing dependencies/tools (including node/npm/npx) if they
-            are required to make a concrete change.
-
-            Task kind: {task_kind}
-            Project: {path_with_namespace}
-            Target: {back_ref}
-            Title: {item_title}
-
-            Additional Prompt from Trigger Comment (everything after @crush):
-            {user_prompt}
-            """
+    if not ws.has_changes():
+        msg = "No filesystem changes detected."
+        logger.error(msg)
+        gl.post_note(
+            project_id,
+            kind,
+            iid,
+            f"⚠️ **Crush**: {msg}",
         )
-        try:
-            retry_summary = _run_crush(
-                cwd=ws.repo_dir,
-                prompt=retry_prompt,
-                model=crush_model,
-                config_path=crush_config_path,
-                data_dir=crush_data_dir,
-                timeout_seconds=retry_timeout_seconds,
-            )
-            crush_summary = (
-                f"{crush_summary}\n\n## Retry Pass\n\n{retry_summary}"
-            ).strip()
-        except RuntimeError as exc:
-            logger.error("Crush retry pass failed: %s", exc)
-            gl.post_note(
-                project_id,
-                kind,
-                iid,
-                f"⚠️ **Crush**: retry pass failed.\n\n```\n{exc}\n```",
-            )
-            sys.exit(1)
+        sys.exit(1)
 
     commit_msg = f"chore: Crush automated fix for {back_ref}\n\nTask: {item_title}"
     ws.commit_all(commit_msg)
 
     if not ws.has_changes() and not _branch_has_commits(ws, base_branch, new_branch):
-        gl.post_note(
-            project_id,
-            kind,
-            iid,
-            "ℹ️ **Crush**: no code changes were necessary.",
-        )
-        return
+        msg = "No filesystem changes detected."
+        logger.error(msg)
+        gl.post_note(project_id, kind, iid, f"⚠️ **Crush**: {msg}")
+        sys.exit(1)
 
     passed, test_output = ws.run_tests()
     if not passed:

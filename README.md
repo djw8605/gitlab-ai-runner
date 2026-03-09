@@ -323,6 +323,7 @@ Then the runner:
   - `GITLAB_TOKEN` lacks `write_repository` scope → push fails.
   - `crush` provider configuration invalid or unreachable → check `CRUSH_BASE_URL`, `CRUSH_MODEL`, and `CRUSH_API_KEY`.
   - Provider rejects `max_tokens` (for example `max_tokens must be at least 1`) → set `CRUSH_MAX_TOKENS` to a positive integer.
+  - Crush returned planning text but made no edits → runner now fails fast with `No filesystem changes detected.`
   - Test suite fails → fix the tests or the generated code.
 
 ### Duplicate Jobs
@@ -336,4 +337,9 @@ kubectl -n unl-weitzel describe job <job-name>
 kubectl -n unl-weitzel logs job/<job-name>
 ```
 
-Runner logs include streamed `crush` stdout/stderr lines (prefixed as `crush stdout | ...` / `crush stderr | ...`), including the final `## Thinking` and `## Files Changed` sections from batch mode output.
+Runner logs include streamed `crush` stdout/stderr lines (prefixed as `crush stdout | ...` / `crush stderr | ...`) and post-run diagnostics.
+Runner logs also include fail-fast diagnostics after each crush run:
+- Crush command + exit code
+- Tail of stdout/stderr
+- `git status --porcelain`
+- `git diff --stat` when changes exist
