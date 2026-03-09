@@ -199,7 +199,8 @@ def _run_crush(
 
     env = os.environ.copy()
     env["CRUSH_DISABLE_METRICS"] = "1"
-    env["CRUSH_GLOBAL_CONFIG"] = str(config_path)
+    # CRUSH_GLOBAL_CONFIG expects a directory; crush appends "/crush.json".
+    env["CRUSH_GLOBAL_CONFIG"] = str(config_path.parent)
     env["CRUSH_GLOBAL_DATA"] = str(data_dir)
 
     def _is_unknown_yolo_flag(text: str) -> bool:
