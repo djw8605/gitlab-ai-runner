@@ -126,7 +126,18 @@ class Workspace:
 
     def checkout_remote_branch(self, branch_name: str) -> None:
         """Checkout an existing branch from origin."""
-        _run(["git", "fetch", "origin", branch_name], cwd=self.repo_dir)
+        # Clone uses --branch/--single-branch, so plain `git fetch origin <branch>`
+        # may only populate FETCH_HEAD and not refs/remotes/origin/<branch>.
+        # Fetch with an explicit refspec so the remote-tracking ref exists.
+        _run(
+            [
+                "git",
+                "fetch",
+                "origin",
+                f"refs/heads/{branch_name}:refs/remotes/origin/{branch_name}",
+            ],
+            cwd=self.repo_dir,
+        )
         _run(
             ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
             cwd=self.repo_dir,
