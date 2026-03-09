@@ -1,6 +1,6 @@
 # gitlab-ai-runner
 
-A self-hosted GitLab **@crush** mention automation that launches Kubernetes Jobs to run a selectable coding agent (`opencode`, `crush`, or `kilo`) against an OpenAI-compatible endpoint (for example, vLLM).
+A self-hosted GitLab **@crush** mention automation that launches Kubernetes Jobs to run a selectable coding agent (`opencode`, `aider`, or `kilo`) against an OpenAI-compatible endpoint (for example, vLLM).
 
 ---
 
@@ -226,7 +226,7 @@ Anything after `@crush` is forwarded to the runner as additional prompt text.
 ```
 @crush fix
 @crush fix prioritize minimal patch, and add regression test
-@crush fix --agent crush prioritize minimal patch, and add regression test
+@crush fix --agent aider prioritize minimal patch, and add regression test
 @crush fix --agent opencode implement this
 ```
 
@@ -239,7 +239,7 @@ For **Issue** fixes, the webhook first:
 Then the runner:
 1. Reads the issue/MR context and prompt text.
 2. Clones the repository and checks out the target branch.
-3. Runs the selected coding agent in batch mode (`opencode`, `crush`, or `kilo`).
+3. Runs the selected coding agent in batch mode (`opencode`, `aider`, or `kilo`).
 4. Uses a generic execution-first prompt that instructs the agent to install required dependencies and run relevant smoke checks for the changes.
 5. Runs the project test suite (pytest / npm test / go test) when quick and available.
 6. If checks pass: commits and pushes updates to the existing branch.
@@ -247,7 +247,7 @@ Then the runner:
 
 Agent selection:
 - Default is `opencode` (configurable via `DEFAULT_CODING_AGENT`).
-- Override per note with `--agent <opencode|crush|kilo>` or `--agent=<...>`.
+- Override per note with `--agent <opencode|aider|kilo>` or `--agent=<...>`.
 
 ---
 
@@ -263,7 +263,7 @@ Agent selection:
 | `K8S_NAMESPACE` | ConfigMap | Namespace for runner Jobs (default: current pod namespace) |
 | `WEBHOOK_IMAGE` | ConfigMap | Container image for webhook Deployment |
 | `JOB_IMAGE` | ConfigMap | Container image for runner Jobs |
-| `DEFAULT_CODING_AGENT` | ConfigMap | Default runner agent (`opencode`, `crush`, or `kilo`) |
+| `DEFAULT_CODING_AGENT` | ConfigMap | Default runner agent (`opencode`, `aider`, or `kilo`) |
 | `LLM_BASE_URL` | ConfigMap | Preferred shared OpenAI-compatible endpoint including `/v1`; used by all agents |
 | `LLM_MODEL` | ConfigMap | Preferred shared model name used by all agents |
 | `LLM_API_KEY` | Secret | Preferred shared provider API key used by all agents |
@@ -288,7 +288,7 @@ Agent selection:
 | `ISSUE_IID` | Issue internal ID (set for fix_issue) |
 | `NOTE_ID` | Triggering comment note ID |
 | `KIND` | `issue` or `mr` |
-| `CODING_AGENT` | Agent selected by webhook (`opencode`, `crush`, or `kilo`) |
+| `CODING_AGENT` | Agent selected by webhook (`opencode`, `aider`, or `kilo`) |
 | `AGENT_USER_PROMPT` | Entire text after `@crush` with `--agent` flag removed |
 | `LLM_BASE_URL` | Passed through from receiver |
 | `LLM_MODEL` | Passed through from receiver |
@@ -353,7 +353,7 @@ kubectl -n unl-weitzel describe job <job-name>
 kubectl -n unl-weitzel logs job/<job-name>
 ```
 
-Runner logs include streamed agent stdout/stderr lines (prefixed as `opencode ...`, `crush ...`, or `kilo ...`) and post-run diagnostics.
+Runner logs include streamed agent stdout/stderr lines (prefixed as `opencode ...`, `aider ...`, or `kilo ...`) and post-run diagnostics.
 Runner logs also include fail-fast diagnostics after each agent run:
 - Agent command + exit code
 - Tail of stdout/stderr

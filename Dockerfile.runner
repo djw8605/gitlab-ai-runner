@@ -3,23 +3,26 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System dependencies for git operations, OpenCode, Crush, Kilo, and common tooling.
+# System dependencies for git operations, OpenCode, Aider, Kilo, and common tooling.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git \
         curl \
         ca-certificates \
-        gpg \
         bash \
         nodejs \
         npm \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://repo.charm.sh/apt/gpg.key \
-      | gpg --dearmor -o /etc/apt/keyrings/charm.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
-      > /etc/apt/sources.list.d/charm.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends crush \
+    && python -m pip install --no-cache-dir aider-install \
+    && aider-install \
+    && aider_bin="$(command -v aider || true)" \
+    && if [ -z "$aider_bin" ]; then \
+         for candidate in /root/.local/bin/aider /root/.local/share/aider/bin/aider /root/.local/share/uv/tools/aider-chat/bin/aider; do \
+           if [ -x "$candidate" ]; then aider_bin="$candidate"; break; fi; \
+         done; \
+       fi \
+    && test -n "$aider_bin" \
+    && install -m 0755 "$aider_bin" /usr/local/bin/aider \
+    && /usr/local/bin/aider --version \
     && npm install -g @kilocode/cli \
     && command -v kilo \
     && curl -fsSL https://opencode.ai/install | bash \
@@ -32,7 +35,6 @@ RUN apt-get update && \
     && test -n "$opencode_bin" \
     && install -m 0755 "$opencode_bin" /usr/local/bin/opencode \
     && /usr/local/bin/opencode --version \
-    && crush -v \
     && kilo --help >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 

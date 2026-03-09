@@ -33,12 +33,10 @@ logging.basicConfig(
 logger = logging.getLogger("runner")
 
 DEFAULT_CODING_AGENT = "opencode"
-SUPPORTED_CODING_AGENTS = {"opencode", "crush", "kilo"}
+SUPPORTED_CODING_AGENTS = {"opencode", "aider", "kilo"}
 DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 DEFAULT_AGENT_MAX_CONTEXT_TOKENS = 128000
 DEFAULT_AGENT_MAX_OUTPUT_TOKENS = 100000
-DEFAULT_CRUSH_ALLOWED_TOOLS = "view,ls,grep,edit,bash"
-DEFAULT_CRUSH_MAX_TOKENS = 4096
 MAX_CONTEXT_NOTES = 30
 MAX_NOTE_BODY_CHARS = 1200
 MAX_NOTES_CONTEXT_CHARS = 16000
@@ -85,31 +83,18 @@ def _parse_coding_agent(raw: str) -> str:
 def _agent_display_name(agent: str) -> str:
     mapping = {
         "opencode": "OpenCode",
-        "crush": "Crush",
+        "aider": "Aider",
         "kilo": "Kilo Code",
     }
     return mapping.get(agent, agent)
 
 
 def _agent_git_identity(agent: str) -> tuple[str, str]:
-    if agent == "crush":
-        return "Crush Bot", "crush-bot@localhost"
+    if agent == "aider":
+        return "Aider Bot", "aider-bot@localhost"
     if agent == "kilo":
         return "Kilo Bot", "kilo-bot@localhost"
     return "OpenCode Bot", "opencode-bot@localhost"
-
-
-def _parse_allowed_tools(raw: str) -> list[str]:
-    tools = [tool.strip() for tool in raw.split(",") if tool.strip()]
-    if not tools:
-        tools = [tool.strip() for tool in DEFAULT_CRUSH_ALLOWED_TOOLS.split(",")]
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for tool in tools:
-        if tool not in seen:
-            deduped.append(tool)
-            seen.add(tool)
-    return deduped
 
 
 def _parse_int_env_any(names: tuple[str, ...], default: int) -> int:
@@ -244,59 +229,10 @@ def _write_kilo_config(
     )
 
 
-def _write_crush_config(
-    config_path: Path,
-    *,
-    base_url: str,
-    model: str,
-    api_key: str,
-    allowed_tools: list[str],
-    max_tokens: int,
-) -> None:
-    """Write a project-local crush.json so non-interactive runs are deterministic."""
-    cfg = {
-        "$schema": "https://charm.land/crush.json",
-        "providers": {
-            "local": {
-                "name": "Local OpenAI-Compatible",
-                "type": "openai-compat",
-                "base_url": base_url,
-                "api_key": api_key,
-                "models": [
-                    {
-                        "id": model,
-                        "name": model,
-                    }
-                ],
-            }
-        },
-        "models": {
-            "large": {
-                "provider": "local",
-                "model": model,
-                "max_tokens": max_tokens,
-            },
-            "small": {
-                "provider": "local",
-                "model": model,
-                "max_tokens": max_tokens,
-            },
-        },
-        "permissions": {
-            "allowed_tools": allowed_tools,
-        },
-        "options": {
-            "disable_metrics": True,
-        },
-    }
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    logger.info("Wrote %s", config_path)
-
-
 @dataclass(frozen=True)
 class _AgentExecutionSettings:
+    base_url: str
+    api_key: str
     model: str
     config_path: Path
     data_dir: Path
@@ -434,29 +370,30 @@ class _OpenCodeExecutor(_BaseAgentExecutor):
         return env
 
 
-class _CrushExecutor(_BaseAgentExecutor):
-    agent_key = "crush"
-    display_name = "Crush"
-    binary_name = "crush"
+class _AiderExecutor(_BaseAgentExecutor):
+    agent_key = "aider"
+    display_name = "Aider"
+    binary_name = "aider"
 
     def _build_command(self, *, cwd: Path, prompt: str) -> list[str]:
+        model = self.settings.model
+        if not model.startswith("openai/"):
+            model = f"openai/{model}"
+        # Headless mode: --message runs one request and exits.
         return [
-            "crush",
-            "-c",
-            str(cwd),
-            "-D",
-            str(self.settings.data_dir),
-            "run",
+            "aider",
+            "--model",
+            model,
+            "--yes",
+            "--no-auto-commits",
+            "--message",
             prompt,
         ]
 
     def _prepare_env(self) -> dict[str, str]:
         env = super()._prepare_env()
-        env["CRUSH_DISABLE_METRICS"] = "1"
-        # CRUSH_GLOBAL_CONFIG expects a directory; crush appends "/crush.json".
-        env["CRUSH_GLOBAL_CONFIG"] = str(self.settings.config_path.parent)
-        env["CRUSH_GLOBAL_DATA"] = str(self.settings.data_dir)
-        env.setdefault("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
+        env["OPENAI_API_BASE"] = self.settings.base_url
+        env["OPENAI_API_KEY"] = self.settings.api_key
         return env
 
 
@@ -493,18 +430,22 @@ def _build_agent_executor(
     *,
     coding_agent: str,
     model: str,
+    base_url: str,
+    api_key: str,
     config_path: Path,
     data_dir: Path,
     timeout_seconds: int,
 ) -> _BaseAgentExecutor:
     settings = _AgentExecutionSettings(
+        base_url=base_url,
+        api_key=api_key,
         model=model,
         config_path=config_path,
         data_dir=data_dir,
         timeout_seconds=timeout_seconds,
     )
-    if coding_agent == "crush":
-        return _CrushExecutor(settings)
+    if coding_agent == "aider":
+        return _AiderExecutor(settings)
     if coding_agent == "kilo":
         return _KiloExecutor(settings)
     return _OpenCodeExecutor(settings)
@@ -516,6 +457,8 @@ def _run_agent(
     cwd: Path,
     prompt: str,
     model: str,
+    base_url: str,
+    api_key: str,
     config_path: Path,
     data_dir: Path,
     timeout_seconds: int,
@@ -523,6 +466,8 @@ def _run_agent(
     executor = _build_agent_executor(
         coding_agent=coding_agent,
         model=model,
+        base_url=base_url,
+        api_key=api_key,
         config_path=config_path,
         data_dir=data_dir,
         timeout_seconds=timeout_seconds,
@@ -584,6 +529,8 @@ def run_review(
     coding_agent: str,
     agent_user_prompt: str,
     agent_model: str,
+    agent_base_url: str,
+    agent_api_key: str,
     agent_config_path: Path,
     agent_data_dir: Path,
     agent_timeout_seconds: int,
@@ -629,6 +576,8 @@ def run_review(
             cwd=agent_workdir,
             prompt=prompt,
             model=agent_model,
+            base_url=agent_base_url,
+            api_key=agent_api_key,
             config_path=agent_config_path,
             data_dir=agent_data_dir,
             timeout_seconds=agent_timeout_seconds,
@@ -663,6 +612,8 @@ def run_fix(
     coding_agent: str,
     agent_user_prompt: str,
     agent_model: str,
+    agent_base_url: str,
+    agent_api_key: str,
     agent_config_path: Path,
     agent_data_dir: Path,
     agent_timeout_seconds: int,
@@ -955,6 +906,8 @@ def run_fix(
             cwd=ws.repo_dir,
             prompt=prompt,
             model=agent_model,
+            base_url=agent_base_url,
+            api_key=agent_api_key,
             config_path=agent_config_path,
             data_dir=agent_data_dir,
             timeout_seconds=agent_timeout_seconds,
@@ -1106,27 +1059,32 @@ def main() -> None:
     agent_name = _agent_display_name(coding_agent)
     agent_user_prompt = _optional(
         "AGENT_USER_PROMPT",
-        _optional("OPENCODE_USER_PROMPT", _optional("CRUSH_USER_PROMPT")),
+        _optional("OPENCODE_USER_PROMPT", _optional("AIDER_USER_PROMPT")),
     )
 
     agent_base_url = _require_any(
-        "LLM_BASE_URL", "OPENCODE_BASE_URL", "CRUSH_BASE_URL", "KILO_BASE_URL"
+        "LLM_BASE_URL", "OPENCODE_BASE_URL", "AIDER_BASE_URL", "KILO_BASE_URL"
     )
-    agent_model = _require_any("LLM_MODEL", "OPENCODE_MODEL", "CRUSH_MODEL", "KILO_MODEL")
+    agent_model = _require_any("LLM_MODEL", "OPENCODE_MODEL", "AIDER_MODEL", "KILO_MODEL")
     agent_api_key = _require_any(
-        "LLM_API_KEY", "OPENCODE_API_KEY", "CRUSH_API_KEY", "KILO_API_KEY"
+        "LLM_API_KEY", "OPENCODE_API_KEY", "AIDER_API_KEY", "KILO_API_KEY"
     )
     agent_timeout_seconds = _parse_int_env_any(
         (
             "LLM_TIMEOUT_SECONDS",
             "OPENCODE_TIMEOUT_SECONDS",
-            "CRUSH_TIMEOUT_SECONDS",
+            "AIDER_TIMEOUT_SECONDS",
             "KILO_TIMEOUT_SECONDS",
         ),
         DEFAULT_AGENT_TIMEOUT_SECONDS,
     )
     agent_max_context_tokens = _parse_int_env_any(
-        ("LLM_MAX_CONTEXT_TOKENS", "OPENCODE_MAX_CONTEXT_TOKENS", "KILO_MAX_CONTEXT_TOKENS"),
+        (
+            "LLM_MAX_CONTEXT_TOKENS",
+            "OPENCODE_MAX_CONTEXT_TOKENS",
+            "AIDER_MAX_CONTEXT_TOKENS",
+            "KILO_MAX_CONTEXT_TOKENS",
+        ),
         DEFAULT_AGENT_MAX_CONTEXT_TOKENS,
     )
     if agent_max_context_tokens < 1:
@@ -1140,6 +1098,7 @@ def main() -> None:
         (
             "LLM_MAX_OUTPUT_TOKENS",
             "OPENCODE_MAX_OUTPUT_TOKENS",
+            "AIDER_MAX_OUTPUT_TOKENS",
             "KILO_MAX_OUTPUT_TOKENS",
         ),
         DEFAULT_AGENT_MAX_OUTPUT_TOKENS,
@@ -1151,17 +1110,6 @@ def main() -> None:
             DEFAULT_AGENT_MAX_OUTPUT_TOKENS,
         )
         agent_max_output_tokens = DEFAULT_AGENT_MAX_OUTPUT_TOKENS
-    crush_max_tokens = _parse_int_env_any(("CRUSH_MAX_TOKENS",), DEFAULT_CRUSH_MAX_TOKENS)
-    if crush_max_tokens < 1:
-        logger.warning(
-            "Invalid CRUSH_MAX_TOKENS=%d, using default %d",
-            crush_max_tokens,
-            DEFAULT_CRUSH_MAX_TOKENS,
-        )
-        crush_max_tokens = DEFAULT_CRUSH_MAX_TOKENS
-    crush_allowed_tools = _parse_allowed_tools(
-        _optional("CRUSH_ALLOWED_TOOLS", DEFAULT_CRUSH_ALLOWED_TOOLS)
-    )
 
     logger.info(
         "Configured coding agent: %s (model=%s, timeout=%ss)",
@@ -1181,17 +1129,7 @@ def main() -> None:
 
     agent_data_dir = workspace_root / f".{coding_agent}-runner-data"
     agent_data_dir.mkdir(parents=True, exist_ok=True)
-    if coding_agent == "crush":
-        agent_config_path = workspace_root / ".crush-runner-config" / "crush.json"
-        _write_crush_config(
-            agent_config_path,
-            base_url=agent_base_url,
-            model=agent_model,
-            api_key=agent_api_key,
-            allowed_tools=crush_allowed_tools,
-            max_tokens=crush_max_tokens,
-        )
-    elif coding_agent == "kilo":
+    if coding_agent == "kilo":
         agent_config_path = workspace_root / ".kilo-runner-config" / "opencode.json"
         _write_kilo_config(
             agent_config_path,
@@ -1200,6 +1138,14 @@ def main() -> None:
             api_key=agent_api_key,
             max_context_tokens=agent_max_context_tokens,
             max_output_tokens=agent_max_output_tokens,
+        )
+    elif coding_agent == "aider":
+        # Aider is configured through env vars and CLI flags.
+        agent_config_path = workspace_root / ".aider-runner-config" / "aider.env"
+        agent_config_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_config_path.write_text(
+            "# aider uses OPENAI_API_BASE/OPENAI_API_KEY\n",
+            encoding="utf-8",
         )
     else:
         agent_config_path = workspace_root / ".opencode-runner-config" / "opencode.json"
@@ -1225,6 +1171,8 @@ def main() -> None:
             coding_agent=coding_agent,
             agent_user_prompt=agent_user_prompt,
             agent_model=agent_model,
+            agent_base_url=agent_base_url,
+            agent_api_key=agent_api_key,
             agent_config_path=agent_config_path,
             agent_data_dir=agent_data_dir,
             agent_timeout_seconds=agent_timeout_seconds,
@@ -1246,6 +1194,8 @@ def main() -> None:
             coding_agent=coding_agent,
             agent_user_prompt=agent_user_prompt,
             agent_model=agent_model,
+            agent_base_url=agent_base_url,
+            agent_api_key=agent_api_key,
             agent_config_path=agent_config_path,
             agent_data_dir=agent_data_dir,
             agent_timeout_seconds=agent_timeout_seconds,

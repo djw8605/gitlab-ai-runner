@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-SUPPORTED_CODING_AGENTS = {"opencode", "crush", "kilo"}
+SUPPORTED_CODING_AGENTS = {"opencode", "aider", "kilo"}
 DEFAULT_CODING_AGENT = "opencode"
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ def _get_default_coding_agent() -> str:
 def _agent_display_name(agent: str) -> str:
     mapping = {
         "opencode": "OpenCode",
-        "crush": "Crush",
+        "aider": "Aider",
         "kilo": "Kilo Code",
     }
     return mapping.get(agent, agent)
@@ -388,41 +388,42 @@ async def webhook(
     llm_base_url = (
         os.environ.get("LLM_BASE_URL")
         or os.environ.get("OPENCODE_BASE_URL")
-        or os.environ.get("CRUSH_BASE_URL")
+        or os.environ.get("AIDER_BASE_URL")
         or os.environ.get("KILO_BASE_URL")
         or ""
     )
     llm_model = (
         os.environ.get("LLM_MODEL")
         or os.environ.get("OPENCODE_MODEL")
-        or os.environ.get("CRUSH_MODEL")
+        or os.environ.get("AIDER_MODEL")
         or os.environ.get("KILO_MODEL")
         or ""
     )
     llm_api_key = (
         os.environ.get("LLM_API_KEY")
         or os.environ.get("OPENCODE_API_KEY")
-        or os.environ.get("CRUSH_API_KEY")
+        or os.environ.get("AIDER_API_KEY")
         or os.environ.get("KILO_API_KEY")
         or ""
     )
     llm_timeout = (
         os.environ.get("LLM_TIMEOUT_SECONDS")
         or os.environ.get("OPENCODE_TIMEOUT_SECONDS")
-        or os.environ.get("CRUSH_TIMEOUT_SECONDS")
+        or os.environ.get("AIDER_TIMEOUT_SECONDS")
         or os.environ.get("KILO_TIMEOUT_SECONDS")
         or ""
     )
     llm_max_context_tokens = (
         os.environ.get("LLM_MAX_CONTEXT_TOKENS")
         or os.environ.get("OPENCODE_MAX_CONTEXT_TOKENS")
+        or os.environ.get("AIDER_MAX_CONTEXT_TOKENS")
         or os.environ.get("KILO_MAX_CONTEXT_TOKENS")
         or ""
     )
     llm_max_output_tokens = (
         os.environ.get("LLM_MAX_OUTPUT_TOKENS")
         or os.environ.get("OPENCODE_MAX_OUTPUT_TOKENS")
-        or os.environ.get("CRUSH_MAX_TOKENS")
+        or os.environ.get("AIDER_MAX_OUTPUT_TOKENS")
         or os.environ.get("KILO_MAX_OUTPUT_TOKENS")
         or ""
     )
@@ -447,12 +448,12 @@ async def webhook(
         "OPENCODE_TIMEOUT_SECONDS": llm_timeout,
         "OPENCODE_MAX_CONTEXT_TOKENS": llm_max_context_tokens,
         "OPENCODE_MAX_OUTPUT_TOKENS": llm_max_output_tokens,
-        "CRUSH_BASE_URL": llm_base_url,
-        "CRUSH_MODEL": llm_model,
-        "CRUSH_API_KEY": llm_api_key,
-        "CRUSH_TIMEOUT_SECONDS": llm_timeout,
-        "CRUSH_MAX_TOKENS": os.environ.get("CRUSH_MAX_TOKENS", ""),
-        "CRUSH_ALLOWED_TOOLS": os.environ.get("CRUSH_ALLOWED_TOOLS", ""),
+        "AIDER_BASE_URL": llm_base_url,
+        "AIDER_MODEL": llm_model,
+        "AIDER_API_KEY": llm_api_key,
+        "AIDER_TIMEOUT_SECONDS": llm_timeout,
+        "AIDER_MAX_CONTEXT_TOKENS": llm_max_context_tokens,
+        "AIDER_MAX_OUTPUT_TOKENS": llm_max_output_tokens,
         "KILO_BASE_URL": llm_base_url,
         "KILO_MODEL": llm_model,
         "KILO_API_KEY": llm_api_key,
@@ -462,7 +463,7 @@ async def webhook(
         # Entire text after "@crush", including the command token.
         "AGENT_USER_PROMPT": user_prompt,
         "OPENCODE_USER_PROMPT": user_prompt,
-        "CRUSH_USER_PROMPT": user_prompt,
+        "AIDER_USER_PROMPT": user_prompt,
     }
     if mr_iid is not None:
         env_vars["MR_IID"] = str(mr_iid)
