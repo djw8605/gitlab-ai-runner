@@ -33,10 +33,22 @@ logger = logging.getLogger("runner")
 DEFAULT_CRUSH_ALLOWED_TOOLS = "view,ls,grep,edit,bash"
 DEFAULT_CRUSH_TIMEOUT_SECONDS = 1800
 DEFAULT_CRUSH_MAX_TOKENS = 4096
+DEFAULT_CRUSH_EXECUTION_ANCHOR_FILE = ".crush/last_run.txt"
 MAX_CONTEXT_NOTES = 30
 MAX_NOTE_BODY_CHARS = 1200
 MAX_NOTES_CONTEXT_CHARS = 16000
 CRUSH_STDIO_TAIL_LINES = 30
+NO_FILE_EDITS_MARKER = "NO_FILE_EDITS_NEEDED:"
+PLANNING_LOOP_MARKERS = (
+    "## current state",
+    "## files & changes",
+    "## todo list status",
+    "for the resuming assistant",
+    "todos tool",
+    "## technical context",
+    "## strategy & approach",
+    "## exact next steps",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -225,8 +237,10 @@ def _run_crush(
 
     stdout_buf: list[str] = []
     stderr_buf: list[str] = []
+    planning_violation: Optional[str] = None
 
     def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
+        nonlocal planning_violation
         if stream is None:
             return
         # line-buffered stream copy so crush output appears in pod logs.
@@ -235,6 +249,18 @@ def _run_crush(
             text = line.rstrip()
             if text:
                 logger.info("crush %s | %s", prefix, text)
+                if prefix == "stdout" and planning_violation is None:
+                    lowered = text.lower()
+                    for marker in PLANNING_LOOP_MARKERS:
+                        if marker in lowered:
+                            planning_violation = marker
+                            logger.error(
+                                "Detected planning-only crush output marker %r; terminating run",
+                                marker,
+                            )
+                            if proc.poll() is None:
+                                proc.terminate()
+                            break
         stream.close()
 
     out_thread = threading.Thread(
@@ -269,6 +295,14 @@ def _run_crush(
     stderr_tail = _tail_lines(stderr)
     logger.info("Crush stdout tail:\n%s", stdout_tail or "<empty>")
     logger.info("Crush stderr tail:\n%s", stderr_tail or "<empty>")
+
+    if planning_violation is not None:
+        detail = stderr[-3000:] if stderr else stdout[-3000:]
+        raise RuntimeError(
+            "crush produced planning-only output "
+            f"(marker: {planning_violation!r}) and was terminated. "
+            f"Output tail:\n{detail}"
+        )
 
     if result_code != 0:
         detail = stderr[-3000:] if stderr else stdout[-3000:]
@@ -424,6 +458,7 @@ def run_fix(
     crush_config_path: Path,
     crush_data_dir: Path,
     crush_timeout_seconds: int,
+    crush_execution_anchor_file: str,
     precreated_mr_iid: Optional[int] = None,
     precreated_mr_url: str = "",
     precreated_mr_branch: str = "",
@@ -491,17 +526,32 @@ def run_fix(
 
     notes_context = _format_notes_context(item_notes)
     user_prompt = crush_user_prompt or "(none)"
+    anchor_file = crush_execution_anchor_file.strip()
+    if anchor_file:
+        first_action = textwrap.dedent(
+            f"""\
+            - Create or update `{anchor_file}` and ensure `.crush/` is listed in `.gitignore`.
+            - Write one line containing task identifiers: task kind, target, and timestamp.
+            - If you cannot edit files for some reason, run `pwd && ls -la` and stop with the error.
+            """
+        ).strip()
+    else:
+        first_action = (
+            "- Run `pwd && ls -la` as your first action to prove tool execution is active."
+        )
 
     prompt = textwrap.dedent(
         f"""\
         You are operating inside a Linux container with a git repo.
-        Rules:
+
+        Execution policy:
+        - You must start by using a tool (bash or edit). No pure-text responses.
+        - Prefer making a small, working change in this run.
+        - If the task is large, complete a Phase 1 slice and stop.
         - Do not restate architecture.
         - Do not produce long plans or todo lists.
         - Every step must run a shell command or edit a file.
         - No external tool APIs are available (do not reference todos/tools).
-        - If a command fails, print the exact command and the error output, then stop.
-        - You must modify at least one file before exiting.
 
         Task kind: {task_kind}
         Project: {path_with_namespace}
@@ -517,16 +567,28 @@ def run_fix(
         {context_label}:
         {notes_context}
 
+        Safety and correctness:
+        - If a command fails, print the exact command and error output, then stop.
+        - Do not commit or push.
+
+        Tooling:
+        - Available tools: bash, edit, view, grep, ls.
+        - Do not install system packages unless the task cannot proceed without them.
+        - Prefer repository-local approaches first.
+        - If system install is required, explain why, then install minimally.
+        - If install fails due to permissions/network, continue with file-only changes and document next steps.
+
+        Mandatory first action:
+        {first_action}
+
         Instructions:
-        - Implement the smallest correct fix for the request.
+        - Make the smallest working change that moves the task forward.
+        - If the task is broad, implement only a Phase 1 slice in this run (minimal scaffolding or one working path), then stop.
         - Edit files directly in this working tree.
-        - Use available tools as needed (including bash/edit/view/grep/ls).
-        - You may install missing dependencies/tools required to complete the task.
-        - If runtime tools are missing, install them (for example node, npm, npx, pytest, go toolchain, or repo dependencies).
-        - For system packages on Debian/Ubuntu, use non-interactive apt commands and keep installs minimal.
-        - Prefer project-local dependency installs first, then system-level installs only when needed.
-        - Do NOT commit or push.
-        - Run relevant tests or checks when possible.
+        - For large tasks, leave clear TODO comments in code for subsequent phases.
+        - Run relevant tests only if available and quick; otherwise skip and note it.
+        - If no file edits are needed, still run at least one safe command and include:
+          {NO_FILE_EDITS_MARKER} <reason>
         - Finish by printing a short Markdown summary with sections:
           ## Summary
           ## Files Changed
@@ -557,21 +619,29 @@ def run_fix(
     _log_post_crush_git_diagnostics(ws.repo_dir)
 
     if not ws.has_changes():
-        msg = "No filesystem changes detected."
-        logger.error(msg)
-        gl.post_note(
-            project_id,
-            kind,
-            iid,
-            f"⚠️ **Crush**: {msg}",
+        if NO_FILE_EDITS_MARKER in crush_summary:
+            logger.info("No file edits were required for this run")
+            gl.post_note(
+                project_id,
+                kind,
+                iid,
+                f"ℹ️ **Crush**: No file edits required.\n\n### Runner Summary\n\n{crush_summary[-2000:]}",
+            )
+            return
+        msg = (
+            "No filesystem changes detected and no explicit no-edit justification was provided."
         )
+        logger.error(msg)
+        gl.post_note(project_id, kind, iid, f"⚠️ **Crush**: {msg}")
         sys.exit(1)
 
     commit_msg = f"chore: Crush automated fix for {back_ref}\n\nTask: {item_title}"
     ws.commit_all(commit_msg)
 
     if not ws.has_changes() and not _branch_has_commits(ws, base_branch, new_branch):
-        msg = "No filesystem changes detected."
+        msg = (
+            "No filesystem changes detected and no commits were produced."
+        )
         logger.error(msg)
         gl.post_note(project_id, kind, iid, f"⚠️ **Crush**: {msg}")
         sys.exit(1)
@@ -688,6 +758,9 @@ def main() -> None:
     precreated_mr_branch = _optional("PRECREATED_MR_BRANCH")
     precreated_mr_target_branch = _optional("PRECREATED_MR_TARGET_BRANCH")
     crush_user_prompt = _optional("CRUSH_USER_PROMPT")
+    crush_execution_anchor_file = _optional(
+        "CRUSH_EXECUTION_ANCHOR_FILE", DEFAULT_CRUSH_EXECUTION_ANCHOR_FILE
+    )
 
     crush_base_url = _require_any("CRUSH_BASE_URL", "LLM_BASE_URL")
     crush_model = _require_any("CRUSH_MODEL", "LLM_MODEL")
@@ -764,6 +837,7 @@ def main() -> None:
             crush_config_path=crush_config_path,
             crush_data_dir=crush_data_dir,
             crush_timeout_seconds=crush_timeout_seconds,
+            crush_execution_anchor_file=crush_execution_anchor_file,
             precreated_mr_iid=precreated_mr_iid,
             precreated_mr_url=precreated_mr_url,
             precreated_mr_branch=precreated_mr_branch,

@@ -315,6 +315,9 @@ async def webhook(
         "CRUSH_ALLOWED_TOOLS": os.environ.get("CRUSH_ALLOWED_TOOLS", ""),
         "CRUSH_TIMEOUT_SECONDS": os.environ.get("CRUSH_TIMEOUT_SECONDS", ""),
         "CRUSH_MAX_TOKENS": os.environ.get("CRUSH_MAX_TOKENS", ""),
+        "CRUSH_EXECUTION_ANCHOR_FILE": os.environ.get(
+            "CRUSH_EXECUTION_ANCHOR_FILE", ""
+        ),
         # Entire text after "@crush", including the command token.
         "CRUSH_USER_PROMPT": user_prompt,
     }

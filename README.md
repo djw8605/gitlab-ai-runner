@@ -236,11 +236,12 @@ For **Issue** fixes, the webhook first:
 Then the runner:
 1. Reads the issue/MR context and prompt text.
 2. Clones the repository and checks out the target branch.
-3. Runs `crush` in batch mode so it can use tools and edit files without interactive permission prompts.
-4. Installs missing tooling/dependencies when needed (for example `node`, `npm`, `npx`, test/build deps).
-5. Runs the test suite (pytest / npm test / go test).
-6. If tests pass: commits and pushes updates to the existing branch.
-7. Posts update notes back to GitLab.
+3. Runs `crush` in execution-first batch mode (tool action required at start).
+4. Applies an incremental Phase 1 slice for broad tasks, instead of attempting the full project in one run.
+5. Avoids system package installs unless strictly required; prefers repo-local/file-first changes.
+6. Runs the test suite (pytest / npm test / go test) when quick and available.
+7. If tests pass: commits and pushes updates to the existing branch.
+8. Posts update notes back to GitLab.
 
 ---
 
@@ -262,6 +263,7 @@ Then the runner:
 | `CRUSH_ALLOWED_TOOLS` | ConfigMap | Comma-separated tools auto-allowed in crush config (default: `view,ls,grep,edit,bash`) |
 | `CRUSH_TIMEOUT_SECONDS` | ConfigMap | Timeout for each crush invocation (default: `1800`) |
 | `CRUSH_MAX_TOKENS` | ConfigMap | Max output tokens sent to provider per crush response (default: `4096`) |
+| `CRUSH_EXECUTION_ANCHOR_FILE` | ConfigMap | Marker file path used for mandatory first tool action (default: `.crush/last_run.txt`; empty disables marker-file instruction) |
 | `ALLOWED_USERS` | ConfigMap | Comma-separated GitLab usernames; empty = allow all |
 | `JOB_TTL_SECONDS` | ConfigMap | Job TTL after completion (default: `1800`) |
 | `JOB_CPU_LIMIT` | ConfigMap | CPU limit for runner Jobs (default: `4`) |
@@ -285,6 +287,7 @@ Then the runner:
 | `CRUSH_ALLOWED_TOOLS` | Passed through from receiver |
 | `CRUSH_TIMEOUT_SECONDS` | Passed through from receiver |
 | `CRUSH_MAX_TOKENS` | Passed through from receiver |
+| `CRUSH_EXECUTION_ANCHOR_FILE` | Passed through from receiver |
 | `CRUSH_USER_PROMPT` | Entire text after `@crush` from the triggering comment |
 | `PRECREATED_MR_IID` | For issue fixes: MR IID prepared by webhook |
 | `PRECREATED_MR_URL` | For issue fixes: MR URL prepared by webhook |
