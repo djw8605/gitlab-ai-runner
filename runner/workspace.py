@@ -103,6 +103,8 @@ class Workspace:
         path_with_namespace: str,
         token: str,
         branch: str = "main",
+        git_user_name: str = "OpenCode Bot",
+        git_user_email: str = "opencode-bot@localhost",
     ) -> Path:
         """Clone the repo into self.root/<project_name>.
 
@@ -129,8 +131,8 @@ class Workspace:
         self._repo_dir = dest
 
         # Configure git identity for commits
-        _run(["git", "config", "user.email", "opencode-bot@localhost"], cwd=dest)
-        _run(["git", "config", "user.name", "OpenCode Bot"], cwd=dest)
+        _run(["git", "config", "user.email", git_user_email], cwd=dest)
+        _run(["git", "config", "user.name", git_user_name], cwd=dest)
 
         return dest
 

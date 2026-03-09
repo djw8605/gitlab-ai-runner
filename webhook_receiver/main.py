@@ -1,10 +1,11 @@
-"""FastAPI webhook receiver for GitLab @crush -> OpenCode automation."""
+"""FastAPI webhook receiver for GitLab @crush coding-agent automation."""
 
 from __future__ import annotations
 
 import logging
 import os
 import re
+import shlex
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -24,11 +25,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+SUPPORTED_CODING_AGENTS = {"opencode", "crush", "kilo"}
+DEFAULT_CODING_AGENT = "opencode"
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="GitLab OpenCode Webhook Receiver", version="1.0.0")
+app = FastAPI(title="GitLab Coding Agent Webhook Receiver", version="1.0.0")
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -68,14 +72,84 @@ def _get_allowed_users() -> Optional[set[str]]:
     return {u.strip() for u in raw.split(",") if u.strip()}
 
 
-def _parse_crush_note(note_text: str) -> tuple[str, str]:
-    """Parse a @crush note into (command, full_user_prompt_after_mention)."""
+def _get_default_coding_agent() -> str:
+    configured = os.environ.get("DEFAULT_CODING_AGENT", DEFAULT_CODING_AGENT).strip().lower()
+    if configured not in SUPPORTED_CODING_AGENTS:
+        logger.warning(
+            "Invalid DEFAULT_CODING_AGENT=%r, falling back to %s",
+            configured,
+            DEFAULT_CODING_AGENT,
+        )
+        return DEFAULT_CODING_AGENT
+    return configured
+
+
+def _agent_display_name(agent: str) -> str:
+    mapping = {
+        "opencode": "OpenCode",
+        "crush": "Crush",
+        "kilo": "Kilo Code",
+    }
+    return mapping.get(agent, agent)
+
+
+def _parse_crush_note(
+    note_text: str,
+    *,
+    default_agent: str,
+) -> tuple[str, str, str, Optional[str]]:
+    """Parse @crush note into (command, prompt_without_agent_flag, coding_agent, error)."""
     after = note_text[len("@crush") :].strip()
     if not after:
-        return "", ""
-    parts = after.split(None, 1)
-    command = parts[0].lower()
-    return command, after
+        return "", "", default_agent, None
+
+    try:
+        tokens = shlex.split(after)
+    except ValueError:
+        tokens = after.split()
+
+    filtered_tokens: list[str] = []
+    coding_agent = default_agent
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        token_lower = token.lower()
+        if token_lower in ("--agent", "-a"):
+            if idx + 1 >= len(tokens):
+                return "", "", default_agent, "missing value for --agent"
+            candidate = tokens[idx + 1].strip().lower()
+            if candidate not in SUPPORTED_CODING_AGENTS:
+                supported = ", ".join(sorted(SUPPORTED_CODING_AGENTS))
+                return (
+                    "",
+                    "",
+                    default_agent,
+                    f"unsupported --agent value {candidate!r} (expected one of: {supported})",
+                )
+            coding_agent = candidate
+            idx += 2
+            continue
+        if token_lower.startswith("--agent="):
+            candidate = token.split("=", 1)[1].strip().lower()
+            if candidate not in SUPPORTED_CODING_AGENTS:
+                supported = ", ".join(sorted(SUPPORTED_CODING_AGENTS))
+                return (
+                    "",
+                    "",
+                    default_agent,
+                    f"unsupported --agent value {candidate!r} (expected one of: {supported})",
+                )
+            coding_agent = candidate
+            idx += 1
+            continue
+        filtered_tokens.append(token)
+        idx += 1
+
+    if not filtered_tokens:
+        return "", "", coding_agent, None
+    command = filtered_tokens[0].lower()
+    user_prompt = " ".join(filtered_tokens)
+    return command, user_prompt, coding_agent, None
 
 
 def _slugify(text: str, max_len: int = 30) -> str:
@@ -162,8 +236,14 @@ async def webhook(
         return JSONResponse({"status": "ignored", "reason": "user not in allowlist"})
 
     # --- Determine task kind and context ----------------------------------
-    command, user_prompt = _parse_crush_note(note_text)
+    default_coding_agent = _get_default_coding_agent()
+    command, user_prompt, coding_agent, parse_error = _parse_crush_note(
+        note_text, default_agent=default_coding_agent
+    )
+    if parse_error:
+        return JSONResponse({"status": "ignored", "reason": parse_error})
     noteable_type = payload.object_attributes.noteable_type  # "Issue" or "MergeRequest"
+    coding_agent_name = _agent_display_name(coding_agent)
 
     task_kind: Optional[str] = None
     mr_iid: Optional[int] = None
@@ -202,12 +282,13 @@ async def webhook(
     project_id = payload.project_id
 
     logger.info(
-        "Handling task_kind=%s project=%d %s=%s note_id=%d",
+        "Handling task_kind=%s project=%d %s=%s note_id=%d coding_agent=%s",
         task_kind,
         project_id,
         kind,
         iid,
         note_id,
+        coding_agent,
     )
 
     # --- Set up GitLab client ---------------------------------------------
@@ -243,7 +324,9 @@ async def webhook(
             gl.add_note_reaction(project_id, kind, iid, note_id, "rocket")
         except GitLabError as exc:
             logger.warning("Could not add 'rocket' reaction (existing job): %s", exc)
-        return JSONResponse({"status": "already_exists", "job_name": job_name})
+        return JSONResponse(
+            {"status": "already_exists", "job_name": job_name, "coding_agent": coding_agent}
+        )
 
     precreated_mr_iid: Optional[int] = None
     precreated_mr_url: str = ""
@@ -258,7 +341,7 @@ async def webhook(
         mr_title = f"fix: resolve issue #{issue_iid} - {issue_title}"
         mr_description = (
             f"Closes #{issue_iid}\n\n"
-            f"This merge request was automatically created by OpenCode from issue #{issue_iid}."
+            f"This merge request was automatically created by {coding_agent_name} from issue #{issue_iid}."
         )
 
         try:
@@ -286,7 +369,7 @@ async def webhook(
             gl.post_issue_note(
                 project_id,
                 issue_iid,
-                f"🚧 **OpenCode**: Creating merge request {mr_ref} to fix this issue.",
+                f"🚧 **{coding_agent_name}**: Creating merge request {mr_ref} to fix this issue.",
             )
             logger.info(
                 "Prepared issue fix MR !%s for issue #%s using branch %s",
@@ -302,39 +385,84 @@ async def webhook(
             )
 
     # --- Build env vars for the runner Job --------------------------------
+    llm_base_url = (
+        os.environ.get("LLM_BASE_URL")
+        or os.environ.get("OPENCODE_BASE_URL")
+        or os.environ.get("CRUSH_BASE_URL")
+        or os.environ.get("KILO_BASE_URL")
+        or ""
+    )
+    llm_model = (
+        os.environ.get("LLM_MODEL")
+        or os.environ.get("OPENCODE_MODEL")
+        or os.environ.get("CRUSH_MODEL")
+        or os.environ.get("KILO_MODEL")
+        or ""
+    )
+    llm_api_key = (
+        os.environ.get("LLM_API_KEY")
+        or os.environ.get("OPENCODE_API_KEY")
+        or os.environ.get("CRUSH_API_KEY")
+        or os.environ.get("KILO_API_KEY")
+        or ""
+    )
+    llm_timeout = (
+        os.environ.get("LLM_TIMEOUT_SECONDS")
+        or os.environ.get("OPENCODE_TIMEOUT_SECONDS")
+        or os.environ.get("CRUSH_TIMEOUT_SECONDS")
+        or os.environ.get("KILO_TIMEOUT_SECONDS")
+        or ""
+    )
+    llm_max_context_tokens = (
+        os.environ.get("LLM_MAX_CONTEXT_TOKENS")
+        or os.environ.get("OPENCODE_MAX_CONTEXT_TOKENS")
+        or os.environ.get("KILO_MAX_CONTEXT_TOKENS")
+        or ""
+    )
+    llm_max_output_tokens = (
+        os.environ.get("LLM_MAX_OUTPUT_TOKENS")
+        or os.environ.get("OPENCODE_MAX_OUTPUT_TOKENS")
+        or os.environ.get("CRUSH_MAX_TOKENS")
+        or os.environ.get("KILO_MAX_OUTPUT_TOKENS")
+        or ""
+    )
+
     env_vars: dict[str, str] = {
         "TASK_KIND": task_kind,
         "PROJECT_ID": str(project_id),
         "NOTE_ID": str(note_id),
         "KIND": kind,
+        "CODING_AGENT": coding_agent,
         "GITLAB_BASE_URL": os.environ.get("GITLAB_BASE_URL", ""),
         "GITLAB_TOKEN": os.environ.get("GITLAB_TOKEN", ""),
-        "OPENCODE_BASE_URL": os.environ.get(
-            "OPENCODE_BASE_URL",
-            os.environ.get("CRUSH_BASE_URL", os.environ.get("LLM_BASE_URL", "")),
-        ),
-        "OPENCODE_MODEL": os.environ.get(
-            "OPENCODE_MODEL",
-            os.environ.get("CRUSH_MODEL", os.environ.get("LLM_MODEL", "")),
-        ),
-        "OPENCODE_API_KEY": os.environ.get(
-            "OPENCODE_API_KEY",
-            os.environ.get("CRUSH_API_KEY", os.environ.get("LLM_API_KEY", "")),
-        ),
-        "OPENCODE_TIMEOUT_SECONDS": os.environ.get(
-            "OPENCODE_TIMEOUT_SECONDS",
-            os.environ.get("CRUSH_TIMEOUT_SECONDS", ""),
-        ),
-        "OPENCODE_MAX_CONTEXT_TOKENS": os.environ.get(
-            "OPENCODE_MAX_CONTEXT_TOKENS",
-            "",
-        ),
-        "OPENCODE_MAX_OUTPUT_TOKENS": os.environ.get(
-            "OPENCODE_MAX_OUTPUT_TOKENS",
-            os.environ.get("CRUSH_MAX_TOKENS", ""),
-        ),
+        "LLM_BASE_URL": llm_base_url,
+        "LLM_MODEL": llm_model,
+        "LLM_API_KEY": llm_api_key,
+        "LLM_TIMEOUT_SECONDS": llm_timeout,
+        "LLM_MAX_CONTEXT_TOKENS": llm_max_context_tokens,
+        "LLM_MAX_OUTPUT_TOKENS": llm_max_output_tokens,
+        "OPENCODE_BASE_URL": llm_base_url,
+        "OPENCODE_MODEL": llm_model,
+        "OPENCODE_API_KEY": llm_api_key,
+        "OPENCODE_TIMEOUT_SECONDS": llm_timeout,
+        "OPENCODE_MAX_CONTEXT_TOKENS": llm_max_context_tokens,
+        "OPENCODE_MAX_OUTPUT_TOKENS": llm_max_output_tokens,
+        "CRUSH_BASE_URL": llm_base_url,
+        "CRUSH_MODEL": llm_model,
+        "CRUSH_API_KEY": llm_api_key,
+        "CRUSH_TIMEOUT_SECONDS": llm_timeout,
+        "CRUSH_MAX_TOKENS": os.environ.get("CRUSH_MAX_TOKENS", ""),
+        "CRUSH_ALLOWED_TOOLS": os.environ.get("CRUSH_ALLOWED_TOOLS", ""),
+        "KILO_BASE_URL": llm_base_url,
+        "KILO_MODEL": llm_model,
+        "KILO_API_KEY": llm_api_key,
+        "KILO_TIMEOUT_SECONDS": llm_timeout,
+        "KILO_MAX_CONTEXT_TOKENS": llm_max_context_tokens,
+        "KILO_MAX_OUTPUT_TOKENS": llm_max_output_tokens,
         # Entire text after "@crush", including the command token.
+        "AGENT_USER_PROMPT": user_prompt,
         "OPENCODE_USER_PROMPT": user_prompt,
+        "CRUSH_USER_PROMPT": user_prompt,
     }
     if mr_iid is not None:
         env_vars["MR_IID"] = str(mr_iid)
@@ -375,7 +503,7 @@ async def webhook(
                 project_id,
                 kind,
                 iid,
-                f"⚠️ **OpenCode**: Failed to start runner job.\n\n```\n{exc}\n```",
+                f"⚠️ **{coding_agent_name}**: Failed to start runner job.\n\n```\n{exc}\n```",
             )
         except GitLabError as gl_exc:
             logger.warning("Could not post failure note: %s", gl_exc)
@@ -395,6 +523,7 @@ async def webhook(
             "status": "job_created",
             "job_name": job_name,
             "task_kind": task_kind,
+            "coding_agent": coding_agent,
             "namespace": namespace,
             "precreated_mr_iid": precreated_mr_iid,
             "precreated_mr_url": precreated_mr_url,

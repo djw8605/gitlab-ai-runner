@@ -7,6 +7,8 @@ and posts results back to GitLab.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -30,9 +32,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("runner")
 
-DEFAULT_OPENCODE_TIMEOUT_SECONDS = 1800
-DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS = 128000
-DEFAULT_OPENCODE_MAX_OUTPUT_TOKENS = 100000
+DEFAULT_CODING_AGENT = "opencode"
+SUPPORTED_CODING_AGENTS = {"opencode", "crush", "kilo"}
+DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
+DEFAULT_AGENT_MAX_CONTEXT_TOKENS = 128000
+DEFAULT_AGENT_MAX_OUTPUT_TOKENS = 100000
+DEFAULT_CRUSH_ALLOWED_TOOLS = "view,ls,grep,edit,bash"
+DEFAULT_CRUSH_MAX_TOKENS = 4096
 MAX_CONTEXT_NOTES = 30
 MAX_NOTE_BODY_CHARS = 1200
 MAX_NOTES_CONTEXT_CHARS = 16000
@@ -65,13 +71,45 @@ def _require_any(*names: str) -> str:
     sys.exit(1)
 
 
-def _parse_int_env(name: str, default: int) -> int:
-    raw = _optional(name, str(default))
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r, using default %d", name, raw, default)
-        return default
+def _parse_coding_agent(raw: str) -> str:
+    agent = raw.strip().lower() if raw else DEFAULT_CODING_AGENT
+    if not agent:
+        agent = DEFAULT_CODING_AGENT
+    if agent not in SUPPORTED_CODING_AGENTS:
+        supported = ", ".join(sorted(SUPPORTED_CODING_AGENTS))
+        logger.error("Unsupported CODING_AGENT=%r (expected one of: %s)", agent, supported)
+        sys.exit(1)
+    return agent
+
+
+def _agent_display_name(agent: str) -> str:
+    mapping = {
+        "opencode": "OpenCode",
+        "crush": "Crush",
+        "kilo": "Kilo Code",
+    }
+    return mapping.get(agent, agent)
+
+
+def _agent_git_identity(agent: str) -> tuple[str, str]:
+    if agent == "crush":
+        return "Crush Bot", "crush-bot@localhost"
+    if agent == "kilo":
+        return "Kilo Bot", "kilo-bot@localhost"
+    return "OpenCode Bot", "opencode-bot@localhost"
+
+
+def _parse_allowed_tools(raw: str) -> list[str]:
+    tools = [tool.strip() for tool in raw.split(",") if tool.strip()]
+    if not tools:
+        tools = [tool.strip() for tool in DEFAULT_CRUSH_ALLOWED_TOOLS.split(",")]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for tool in tools:
+        if tool not in seen:
+            deduped.append(tool)
+            seen.add(tool)
+    return deduped
 
 
 def _parse_int_env_any(names: tuple[str, ...], default: int) -> int:
@@ -117,23 +155,23 @@ def _format_notes_context(notes: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# OpenCode helpers
+# Agent helpers
 # ---------------------------------------------------------------------------
 
 
-def _write_opencode_config(
+def _write_openai_compatible_config(
     config_path: Path,
     *,
+    schema_url: str,
     base_url: str,
     model: str,
     api_key: str,
     max_context_tokens: int,
     max_output_tokens: int,
 ) -> None:
-    """Write a project-local opencode.json for deterministic non-interactive runs."""
     provider_name = "custom"
     cfg = {
-        "$schema": "https://opencode.ai/config.json",
+        "$schema": schema_url,
         "provider": {
             provider_name: {
                 "npm": "@ai-sdk/openai-compatible",
@@ -164,8 +202,318 @@ def _write_opencode_config(
     logger.info("Wrote %s", config_path)
 
 
-def _run_opencode(
+def _write_opencode_config(
+    config_path: Path,
     *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    max_context_tokens: int,
+    max_output_tokens: int,
+) -> None:
+    """Write a project-local opencode.json for deterministic non-interactive runs."""
+    _write_openai_compatible_config(
+        config_path,
+        schema_url="https://opencode.ai/config.json",
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        max_context_tokens=max_context_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def _write_kilo_config(
+    config_path: Path,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    max_context_tokens: int,
+    max_output_tokens: int,
+) -> None:
+    """Write an OpenCode-compatible provider config consumed by Kilo CLI."""
+    _write_openai_compatible_config(
+        config_path,
+        schema_url="https://kilo.ai/config.json",
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        max_context_tokens=max_context_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def _write_crush_config(
+    config_path: Path,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    allowed_tools: list[str],
+    max_tokens: int,
+) -> None:
+    """Write a project-local crush.json so non-interactive runs are deterministic."""
+    cfg = {
+        "$schema": "https://charm.land/crush.json",
+        "providers": {
+            "local": {
+                "name": "Local OpenAI-Compatible",
+                "type": "openai-compat",
+                "base_url": base_url,
+                "api_key": api_key,
+                "models": [
+                    {
+                        "id": model,
+                        "name": model,
+                    }
+                ],
+            }
+        },
+        "models": {
+            "large": {
+                "provider": "local",
+                "model": model,
+                "max_tokens": max_tokens,
+            },
+            "small": {
+                "provider": "local",
+                "model": model,
+                "max_tokens": max_tokens,
+            },
+        },
+        "permissions": {
+            "allowed_tools": allowed_tools,
+        },
+        "options": {
+            "disable_metrics": True,
+        },
+    }
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote %s", config_path)
+
+
+@dataclass(frozen=True)
+class _AgentExecutionSettings:
+    model: str
+    config_path: Path
+    data_dir: Path
+    timeout_seconds: int
+
+
+def _tail_lines(text: str, n: int = AGENT_STDIO_TAIL_LINES) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    return "\n".join(lines[-n:])
+
+
+class _BaseAgentExecutor(ABC):
+    agent_key: str
+    display_name: str
+    binary_name: str
+
+    def __init__(self, settings: _AgentExecutionSettings) -> None:
+        self.settings = settings
+
+    @abstractmethod
+    def _build_command(self, *, cwd: Path, prompt: str) -> list[str]:
+        pass
+
+    def _common_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        home_dir = self.settings.data_dir / "home"
+        xdg_cache = self.settings.data_dir / "xdg-cache"
+        xdg_config = self.settings.data_dir / "xdg-config"
+        xdg_data = self.settings.data_dir / "xdg-data"
+        home_dir.mkdir(parents=True, exist_ok=True)
+        xdg_cache.mkdir(parents=True, exist_ok=True)
+        xdg_config.mkdir(parents=True, exist_ok=True)
+        xdg_data.mkdir(parents=True, exist_ok=True)
+
+        env["HOME"] = str(home_dir)
+        env["XDG_CACHE_HOME"] = str(xdg_cache)
+        env["XDG_CONFIG_HOME"] = str(xdg_config)
+        env["XDG_DATA_HOME"] = str(xdg_data)
+        env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+        return env
+
+    def _prepare_env(self) -> dict[str, str]:
+        return self._common_env()
+
+    def _log_extra_context(self) -> None:
+        pass
+
+    def run(self, *, cwd: Path, prompt: str) -> str:
+        cmd = self._build_command(cwd=cwd, prompt=prompt)
+        display_cmd = [*cmd[:-1], "<prompt>"] if cmd else []
+        logger.info("Running %s in %s", self.agent_key, cwd)
+        logger.info("%s command: %s", self.display_name, " ".join(display_cmd))
+        self._log_extra_context()
+
+        env = self._prepare_env()
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"{self.binary_name} binary not found in runner image"
+            ) from exc
+
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
+
+        def _pump(stream: Optional[TextIO], prefix: str, buf: list[str]) -> None:
+            if stream is None:
+                return
+            for line in iter(stream.readline, ""):
+                buf.append(line)
+                text = line.rstrip()
+                if text:
+                    logger.info("%s %s | %s", self.agent_key, prefix, text)
+            stream.close()
+
+        out_thread = threading.Thread(
+            target=_pump, args=(proc.stdout, "stdout", stdout_buf), daemon=True
+        )
+        err_thread = threading.Thread(
+            target=_pump, args=(proc.stderr, "stderr", stderr_buf), daemon=True
+        )
+        out_thread.start()
+        err_thread.start()
+
+        try:
+            result_code = proc.wait(timeout=self.settings.timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            raise RuntimeError(
+                f"{self.agent_key} timed out after {self.settings.timeout_seconds}s"
+            ) from exc
+        finally:
+            out_thread.join()
+            err_thread.join()
+
+        stdout = "".join(stdout_buf).strip()
+        stderr = "".join(stderr_buf).strip()
+        logger.info("%s exit code: %d", self.display_name, result_code)
+        logger.info("%s stdout tail:\n%s", self.display_name, _tail_lines(stdout) or "<empty>")
+        logger.info("%s stderr tail:\n%s", self.display_name, _tail_lines(stderr) or "<empty>")
+
+        if result_code != 0:
+            detail = stderr[-3000:] if stderr else stdout[-3000:]
+            raise RuntimeError(
+                f"{self.agent_key} failed with exit code {result_code}: {detail}"
+            )
+        if not stdout:
+            raise RuntimeError(f"{self.agent_key} returned an empty response")
+        return stdout
+
+
+class _OpenCodeExecutor(_BaseAgentExecutor):
+    agent_key = "opencode"
+    display_name = "OpenCode"
+    binary_name = "opencode"
+
+    def _build_command(self, *, cwd: Path, prompt: str) -> list[str]:
+        return ["opencode", "run", "--model", f"custom/{self.settings.model}", prompt]
+
+    def _prepare_env(self) -> dict[str, str]:
+        env = super()._prepare_env()
+        env["OPENCODE_CONFIG"] = str(self.settings.config_path)
+        return env
+
+
+class _CrushExecutor(_BaseAgentExecutor):
+    agent_key = "crush"
+    display_name = "Crush"
+    binary_name = "crush"
+
+    def _build_command(self, *, cwd: Path, prompt: str) -> list[str]:
+        return [
+            "crush",
+            "-y",
+            "-c",
+            str(cwd),
+            "-D",
+            str(self.settings.data_dir),
+            "run",
+            prompt,
+        ]
+
+    def _prepare_env(self) -> dict[str, str]:
+        env = super()._prepare_env()
+        env["CRUSH_DISABLE_METRICS"] = "1"
+        # CRUSH_GLOBAL_CONFIG expects a directory; crush appends "/crush.json".
+        env["CRUSH_GLOBAL_CONFIG"] = str(self.settings.config_path.parent)
+        env["CRUSH_GLOBAL_DATA"] = str(self.settings.data_dir)
+        env.setdefault("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
+        return env
+
+
+class _KiloExecutor(_BaseAgentExecutor):
+    agent_key = "kilo"
+    display_name = "Kilo Code"
+    binary_name = "kilo"
+
+    def _build_command(self, *, cwd: Path, prompt: str) -> list[str]:
+        return ["kilo", "run", "--auto", prompt]
+
+    def _log_extra_context(self) -> None:
+        logger.info("Kilo model configured as custom/%s", self.settings.model)
+
+    def _prepare_env(self) -> dict[str, str]:
+        env = super()._prepare_env()
+        config_text = self.settings.config_path.read_text(encoding="utf-8")
+        xdg_config = Path(env["XDG_CONFIG_HOME"])
+        home_dir = Path(env["HOME"])
+        config_targets = [
+            xdg_config / "kilo" / "opencode.json",
+            xdg_config / "kilocode" / "opencode.json",
+            home_dir / ".config" / "kilo" / "opencode.json",
+            home_dir / ".config" / "kilocode" / "opencode.json",
+        ]
+        for target in config_targets:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(config_text, encoding="utf-8")
+        logger.info("Wrote Kilo config to %s", config_targets[0])
+        return env
+
+
+def _build_agent_executor(
+    *,
+    coding_agent: str,
+    model: str,
+    config_path: Path,
+    data_dir: Path,
+    timeout_seconds: int,
+) -> _BaseAgentExecutor:
+    settings = _AgentExecutionSettings(
+        model=model,
+        config_path=config_path,
+        data_dir=data_dir,
+        timeout_seconds=timeout_seconds,
+    )
+    if coding_agent == "crush":
+        return _CrushExecutor(settings)
+    if coding_agent == "kilo":
+        return _KiloExecutor(settings)
+    return _OpenCodeExecutor(settings)
+
+
+def _run_agent(
+    *,
+    coding_agent: str,
     cwd: Path,
     prompt: str,
     model: str,
@@ -173,98 +521,14 @@ def _run_opencode(
     data_dir: Path,
     timeout_seconds: int,
 ) -> str:
-    """Execute opencode in non-interactive mode, stream logs, and return stdout."""
-    cmd = ["opencode", "run", "--model", f"custom/{model}", prompt]
-    #display_cmd = [*cmd[:-1], "<prompt>"]
-    logger.info("Running opencode in %s", cwd)
-    logger.info("OpenCode command: %s", " ".join(cmd))
-
-    env = os.environ.copy()
-    home_dir = data_dir / "home"
-    xdg_cache = data_dir / "xdg-cache"
-    xdg_config = data_dir / "xdg-config"
-    xdg_data = data_dir / "xdg-data"
-    home_dir.mkdir(parents=True, exist_ok=True)
-    xdg_cache.mkdir(parents=True, exist_ok=True)
-    xdg_config.mkdir(parents=True, exist_ok=True)
-    xdg_data.mkdir(parents=True, exist_ok=True)
-
-    env["OPENCODE_CONFIG"] = str(config_path)
-    env["HOME"] = str(home_dir)
-    env["XDG_CACHE_HOME"] = str(xdg_cache)
-    env["XDG_CONFIG_HOME"] = str(xdg_config)
-    env["XDG_DATA_HOME"] = str(xdg_data)
-    env.setdefault("DEBIAN_FRONTEND", "noninteractive")
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("opencode binary not found in runner image") from exc
-
-    stdout_buf: list[str] = []
-    stderr_buf: list[str] = []
-
-    def _pump(stream: Optional[TextIO], prefix: str, buf: list[str]) -> None:
-        if stream is None:
-            return
-        # line-buffered stream copy so agent output appears in pod logs.
-        for line in iter(stream.readline, ""):
-            buf.append(line)
-            text = line.rstrip()
-            if text:
-                logger.info("opencode %s | %s", prefix, text)
-        stream.close()
-
-    out_thread = threading.Thread(
-        target=_pump, args=(proc.stdout, "stdout", stdout_buf), daemon=True
+    executor = _build_agent_executor(
+        coding_agent=coding_agent,
+        model=model,
+        config_path=config_path,
+        data_dir=data_dir,
+        timeout_seconds=timeout_seconds,
     )
-    err_thread = threading.Thread(
-        target=_pump, args=(proc.stderr, "stderr", stderr_buf), daemon=True
-    )
-    out_thread.start()
-    err_thread.start()
-
-    try:
-        result_code = proc.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        raise RuntimeError(f"opencode timed out after {timeout_seconds}s") from exc
-    finally:
-        out_thread.join()
-        err_thread.join()
-
-    stdout = "".join(stdout_buf).strip()
-    stderr = "".join(stderr_buf).strip()
-    logger.info("OpenCode exit code: %d", result_code)
-
-    def _tail_lines(text: str, n: int = AGENT_STDIO_TAIL_LINES) -> str:
-        if not text:
-            return ""
-        lines = text.splitlines()
-        return "\n".join(lines[-n:])
-
-    stdout_tail = _tail_lines(stdout)
-    stderr_tail = _tail_lines(stderr)
-    logger.info("OpenCode stdout tail:\n%s", stdout_tail or "<empty>")
-    logger.info("OpenCode stderr tail:\n%s", stderr_tail or "<empty>")
-
-    if result_code != 0:
-        detail = stderr[-3000:] if stderr else stdout[-3000:]
-        raise RuntimeError(f"opencode failed with exit code {result_code}: {detail}")
-
-    if not stdout:
-        raise RuntimeError("opencode returned an empty response")
-
-    return stdout
+    return executor.run(cwd=cwd, prompt=prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -318,15 +582,17 @@ def run_review(
     *,
     project_id: int,
     mr_iid: int,
-    opencode_user_prompt: str,
-    opencode_model: str,
-    opencode_config_path: Path,
-    opencode_data_dir: Path,
-    opencode_timeout_seconds: int,
-    opencode_workdir: Path,
+    coding_agent: str,
+    agent_user_prompt: str,
+    agent_model: str,
+    agent_config_path: Path,
+    agent_data_dir: Path,
+    agent_timeout_seconds: int,
+    agent_workdir: Path,
 ) -> None:
-    """Fetch MR diff, produce a review via opencode, post as a note."""
-    logger.info("Starting REVIEW task for MR !%d", mr_iid)
+    """Fetch MR diff, produce a review via selected agent, post as a note."""
+    agent_name = _agent_display_name(coding_agent)
+    logger.info("Starting REVIEW task for MR !%d with %s", mr_iid, coding_agent)
 
     mr = gl.get_mr(project_id, mr_iid)
     changes = gl.get_mr_changes(project_id, mr_iid)
@@ -336,7 +602,7 @@ def run_review(
     description = mr.get("description", "")
     diff_text = _format_diff(changes)
     notes_context = _format_notes_context(mr_notes)
-    user_prompt = opencode_user_prompt or "(none)"
+    user_prompt = agent_user_prompt or "(none)"
 
     prompt = textwrap.dedent(
         f"""\
@@ -359,24 +625,25 @@ def run_review(
     )
 
     try:
-        review_text = _run_opencode(
-            cwd=opencode_workdir,
+        review_text = _run_agent(
+            coding_agent=coding_agent,
+            cwd=agent_workdir,
             prompt=prompt,
-            model=opencode_model,
-            config_path=opencode_config_path,
-            data_dir=opencode_data_dir,
-            timeout_seconds=opencode_timeout_seconds,
+            model=agent_model,
+            config_path=agent_config_path,
+            data_dir=agent_data_dir,
+            timeout_seconds=agent_timeout_seconds,
         )
     except RuntimeError as exc:
-        logger.error("OpenCode review failed: %s", exc)
+        logger.error("%s review failed: %s", agent_name, exc)
         gl.post_mr_note(
             project_id,
             mr_iid,
-            f"⚠️ **OpenCode**: review failed.\n\n```\n{exc}\n```",
+            f"⚠️ **{agent_name}**: review failed.\n\n```\n{exc}\n```",
         )
         sys.exit(1)
 
-    note_body = f"## 🤖 OpenCode Review\n\n{review_text}"
+    note_body = f"## 🤖 {agent_name} Review\n\n{review_text}"
     gl.post_mr_note(project_id, mr_iid, note_body)
     logger.info("Posted review to MR !%d", mr_iid)
 
@@ -394,18 +661,27 @@ def run_fix(
     kind: str,
     iid: int,
     task_kind: str,
-    opencode_user_prompt: str,
-    opencode_model: str,
-    opencode_config_path: Path,
-    opencode_data_dir: Path,
-    opencode_timeout_seconds: int,
+    coding_agent: str,
+    agent_user_prompt: str,
+    agent_model: str,
+    agent_config_path: Path,
+    agent_data_dir: Path,
+    agent_timeout_seconds: int,
     precreated_mr_iid: Optional[int] = None,
     precreated_mr_url: str = "",
     precreated_mr_branch: str = "",
     precreated_mr_target_branch: str = "",
 ) -> None:
-    """Fix an issue or MR: let opencode edit code, push branch, open MR."""
-    logger.info("Starting FIX task (%s) for %s #%d", task_kind, kind, iid)
+    """Fix an issue or MR: let selected coding agent edit code, push branch, open MR."""
+    agent_name = _agent_display_name(coding_agent)
+    git_user_name, git_user_email = _agent_git_identity(coding_agent)
+    logger.info(
+        "Starting FIX task (%s) for %s #%d with %s",
+        task_kind,
+        kind,
+        iid,
+        coding_agent,
+    )
 
     project = gl.get_project(project_id)
     path_with_namespace: str = project["path_with_namespace"]
@@ -435,7 +711,7 @@ def run_fix(
         mr_title = f"fix: resolve issue #{iid} - {item_title}"
         mr_description = (
             f"Closes #{iid}\n\n"
-            f"This MR was automatically generated by OpenCode in response to "
+            f"This MR was automatically generated by {agent_name} in response to "
             f"[issue #{iid}]({item.get('web_url', '')})."
         )
     else:  # fix_mr
@@ -449,7 +725,7 @@ def run_fix(
         context_label = "Merge Request Comment Context"
         mr_title = f"fix: address changes requested in !{iid}"
         mr_description = (
-            f"This MR was automatically generated by OpenCode in response to "
+            f"This MR was automatically generated by {agent_name} in response to "
             f"[MR !{iid}]({item.get('web_url', '')})."
         )
 
@@ -458,6 +734,8 @@ def run_fix(
         path_with_namespace=path_with_namespace,
         token=gitlab_token,
         branch=base_branch,
+        git_user_name=git_user_name,
+        git_user_email=git_user_email,
     )
     if use_precreated_issue_mr:
         ws.checkout_remote_branch(new_branch)
@@ -465,7 +743,7 @@ def run_fix(
         ws.create_branch(new_branch)
 
     notes_context = _format_notes_context(item_notes)
-    user_prompt = opencode_user_prompt or "(none)"
+    user_prompt = agent_user_prompt or "(none)"
     prompt = textwrap.dedent(
         f"""\
         You are operating inside a Linux container with a git repository.
@@ -673,22 +951,23 @@ def run_fix(
     )
 
     try:
-        agent_summary = _run_opencode(
+        agent_summary = _run_agent(
+            coding_agent=coding_agent,
             cwd=ws.repo_dir,
             prompt=prompt,
-            model=opencode_model,
-            config_path=opencode_config_path,
-            data_dir=opencode_data_dir,
-            timeout_seconds=opencode_timeout_seconds,
+            model=agent_model,
+            config_path=agent_config_path,
+            data_dir=agent_data_dir,
+            timeout_seconds=agent_timeout_seconds,
         )
     except RuntimeError as exc:
-        logger.error("OpenCode fix failed: %s", exc)
+        logger.error("%s fix failed: %s", agent_name, exc)
         _log_post_agent_git_diagnostics(ws.repo_dir)
         gl.post_note(
             project_id,
             kind,
             iid,
-            f"⚠️ **OpenCode**: automated fix failed.\n\n```\n{exc}\n```",
+            f"⚠️ **{agent_name}**: automated fix failed.\n\n```\n{exc}\n```",
         )
         sys.exit(1)
 
@@ -697,10 +976,10 @@ def run_fix(
     if not ws.has_changes():
         msg = "No filesystem changes detected."
         logger.error(msg)
-        gl.post_note(project_id, kind, iid, f"⚠️ **OpenCode**: {msg}")
+        gl.post_note(project_id, kind, iid, f"⚠️ **{agent_name}**: {msg}")
         sys.exit(1)
 
-    commit_msg = f"chore: OpenCode automated fix for {back_ref}\n\nTask: {item_title}"
+    commit_msg = f"chore: {agent_name} automated fix for {back_ref}\n\nTask: {item_title}"
     ws.commit_all(commit_msg)
 
     if not ws.has_changes() and not _branch_has_commits(ws, base_branch, new_branch):
@@ -708,7 +987,7 @@ def run_fix(
             "No filesystem changes detected and no commits were produced."
         )
         logger.error(msg)
-        gl.post_note(project_id, kind, iid, f"⚠️ **OpenCode**: {msg}")
+        gl.post_note(project_id, kind, iid, f"⚠️ **{agent_name}**: {msg}")
         sys.exit(1)
 
     passed, test_output = ws.run_tests()
@@ -718,7 +997,7 @@ def run_fix(
             project_id,
             kind,
             iid,
-            f"⚠️ **OpenCode**: tests failed after applying changes. "
+            f"⚠️ **{agent_name}**: tests failed after applying changes. "
             f"Branch `{new_branch}` was NOT pushed.\n\n```\n{test_snippet}\n```",
         )
         sys.exit(1)
@@ -740,14 +1019,14 @@ def run_fix(
         gl.post_issue_note(
             project_id,
             iid,
-            f"🤖 **OpenCode** updated merge request {mr_ref}.\n\n"
+            f"🤖 **{agent_name}** updated merge request {mr_ref}.\n\n"
             f"Branch: `{new_branch}`",
         )
         if precreated_mr_iid is not None:
             gl.post_mr_note(
                 project_id,
                 precreated_mr_iid,
-                "🤖 **OpenCode** updated this merge request from the linked issue.\n\n"
+                f"🤖 **{agent_name}** updated this merge request from the linked issue.\n\n"
                 f"### Runner Summary\n\n{summary_tail}",
             )
         logger.info("Fix complete. Updated existing MR: %s", precreated_mr_url)
@@ -769,7 +1048,7 @@ def run_fix(
             project_id,
             kind,
             iid,
-            f"⚠️ **OpenCode**: branch `{new_branch}` was pushed but MR creation failed.\n"
+            f"⚠️ **{agent_name}**: branch `{new_branch}` was pushed but MR creation failed.\n"
             f"Please open the MR manually.\n\n```\n{exc}\n```",
         )
         sys.exit(1)
@@ -779,7 +1058,7 @@ def run_fix(
         project_id,
         kind,
         iid,
-        f"🤖 **OpenCode** created a fix in !{new_mr_iid}: {new_mr_url}\n\n"
+        f"🤖 **{agent_name}** created a fix in !{new_mr_iid}: {new_mr_url}\n\n"
         f"Branch: `{new_branch}`\n\n"
         f"### Runner Summary\n\n{summary_tail}",
     )
@@ -822,37 +1101,76 @@ def main() -> None:
     precreated_mr_url = _optional("PRECREATED_MR_URL")
     precreated_mr_branch = _optional("PRECREATED_MR_BRANCH")
     precreated_mr_target_branch = _optional("PRECREATED_MR_TARGET_BRANCH")
-    opencode_user_prompt = _optional("OPENCODE_USER_PROMPT", _optional("CRUSH_USER_PROMPT"))
+    coding_agent = _parse_coding_agent(
+        _optional("CODING_AGENT", _optional("DEFAULT_CODING_AGENT", DEFAULT_CODING_AGENT))
+    )
+    agent_name = _agent_display_name(coding_agent)
+    agent_user_prompt = _optional(
+        "AGENT_USER_PROMPT",
+        _optional("OPENCODE_USER_PROMPT", _optional("CRUSH_USER_PROMPT")),
+    )
 
-    opencode_base_url = _require_any("OPENCODE_BASE_URL", "CRUSH_BASE_URL", "LLM_BASE_URL")
-    opencode_model = _require_any("OPENCODE_MODEL", "CRUSH_MODEL", "LLM_MODEL")
-    opencode_api_key = _require_any("OPENCODE_API_KEY", "CRUSH_API_KEY", "LLM_API_KEY")
-    opencode_timeout_seconds = _parse_int_env_any(
-        ("OPENCODE_TIMEOUT_SECONDS", "CRUSH_TIMEOUT_SECONDS"),
-        DEFAULT_OPENCODE_TIMEOUT_SECONDS,
+    agent_base_url = _require_any(
+        "LLM_BASE_URL", "OPENCODE_BASE_URL", "CRUSH_BASE_URL", "KILO_BASE_URL"
     )
-    opencode_max_context_tokens = _parse_int_env_any(
-        ("OPENCODE_MAX_CONTEXT_TOKENS",),
-        DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS,
+    agent_model = _require_any("LLM_MODEL", "OPENCODE_MODEL", "CRUSH_MODEL", "KILO_MODEL")
+    agent_api_key = _require_any(
+        "LLM_API_KEY", "OPENCODE_API_KEY", "CRUSH_API_KEY", "KILO_API_KEY"
     )
-    if opencode_max_context_tokens < 1:
+    agent_timeout_seconds = _parse_int_env_any(
+        (
+            "LLM_TIMEOUT_SECONDS",
+            "OPENCODE_TIMEOUT_SECONDS",
+            "CRUSH_TIMEOUT_SECONDS",
+            "KILO_TIMEOUT_SECONDS",
+        ),
+        DEFAULT_AGENT_TIMEOUT_SECONDS,
+    )
+    agent_max_context_tokens = _parse_int_env_any(
+        ("LLM_MAX_CONTEXT_TOKENS", "OPENCODE_MAX_CONTEXT_TOKENS", "KILO_MAX_CONTEXT_TOKENS"),
+        DEFAULT_AGENT_MAX_CONTEXT_TOKENS,
+    )
+    if agent_max_context_tokens < 1:
         logger.warning(
-            "Invalid OPENCODE_MAX_CONTEXT_TOKENS=%d, using default %d",
-            opencode_max_context_tokens,
-            DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS,
+            "Invalid max context tokens=%d, using default %d",
+            agent_max_context_tokens,
+            DEFAULT_AGENT_MAX_CONTEXT_TOKENS,
         )
-        opencode_max_context_tokens = DEFAULT_OPENCODE_MAX_CONTEXT_TOKENS
-    opencode_max_output_tokens = _parse_int_env_any(
-        ("OPENCODE_MAX_OUTPUT_TOKENS", "CRUSH_MAX_TOKENS"),
-        DEFAULT_OPENCODE_MAX_OUTPUT_TOKENS,
+        agent_max_context_tokens = DEFAULT_AGENT_MAX_CONTEXT_TOKENS
+    agent_max_output_tokens = _parse_int_env_any(
+        (
+            "LLM_MAX_OUTPUT_TOKENS",
+            "OPENCODE_MAX_OUTPUT_TOKENS",
+            "KILO_MAX_OUTPUT_TOKENS",
+        ),
+        DEFAULT_AGENT_MAX_OUTPUT_TOKENS,
     )
-    if opencode_max_output_tokens < 1:
+    if agent_max_output_tokens < 1:
         logger.warning(
-            "Invalid OPENCODE_MAX_OUTPUT_TOKENS=%d, using default %d",
-            opencode_max_output_tokens,
-            DEFAULT_OPENCODE_MAX_OUTPUT_TOKENS,
+            "Invalid max output tokens=%d, using default %d",
+            agent_max_output_tokens,
+            DEFAULT_AGENT_MAX_OUTPUT_TOKENS,
         )
-        opencode_max_output_tokens = DEFAULT_OPENCODE_MAX_OUTPUT_TOKENS
+        agent_max_output_tokens = DEFAULT_AGENT_MAX_OUTPUT_TOKENS
+    crush_max_tokens = _parse_int_env_any(("CRUSH_MAX_TOKENS",), DEFAULT_CRUSH_MAX_TOKENS)
+    if crush_max_tokens < 1:
+        logger.warning(
+            "Invalid CRUSH_MAX_TOKENS=%d, using default %d",
+            crush_max_tokens,
+            DEFAULT_CRUSH_MAX_TOKENS,
+        )
+        crush_max_tokens = DEFAULT_CRUSH_MAX_TOKENS
+    crush_allowed_tools = _parse_allowed_tools(
+        _optional("CRUSH_ALLOWED_TOOLS", DEFAULT_CRUSH_ALLOWED_TOOLS)
+    )
+
+    logger.info(
+        "Configured coding agent: %s (model=%s, timeout=%ss)",
+        agent_name,
+        agent_model,
+        agent_timeout_seconds,
+    )
+    logger.info("Shared LLM endpoint (all agents): %s", agent_base_url)
 
     gl = GitLabClient(
         base_url=_require("GITLAB_BASE_URL"),
@@ -862,18 +1180,38 @@ def main() -> None:
     workspace_root = Path(os.environ.get("WORKSPACE_DIR", "/workspace"))
     workspace_root.mkdir(parents=True, exist_ok=True)
 
-    opencode_config_path = workspace_root / ".opencode-runner-config" / "opencode.json"
-    opencode_data_dir = workspace_root / ".opencode-runner-data"
-    opencode_data_dir.mkdir(parents=True, exist_ok=True)
-
-    _write_opencode_config(
-        opencode_config_path,
-        base_url=opencode_base_url,
-        model=opencode_model,
-        api_key=opencode_api_key,
-        max_context_tokens=opencode_max_context_tokens,
-        max_output_tokens=opencode_max_output_tokens,
-    )
+    agent_data_dir = workspace_root / f".{coding_agent}-runner-data"
+    agent_data_dir.mkdir(parents=True, exist_ok=True)
+    if coding_agent == "crush":
+        agent_config_path = workspace_root / ".crush-runner-config" / "crush.json"
+        _write_crush_config(
+            agent_config_path,
+            base_url=agent_base_url,
+            model=agent_model,
+            api_key=agent_api_key,
+            allowed_tools=crush_allowed_tools,
+            max_tokens=crush_max_tokens,
+        )
+    elif coding_agent == "kilo":
+        agent_config_path = workspace_root / ".kilo-runner-config" / "opencode.json"
+        _write_kilo_config(
+            agent_config_path,
+            base_url=agent_base_url,
+            model=agent_model,
+            api_key=agent_api_key,
+            max_context_tokens=agent_max_context_tokens,
+            max_output_tokens=agent_max_output_tokens,
+        )
+    else:
+        agent_config_path = workspace_root / ".opencode-runner-config" / "opencode.json"
+        _write_opencode_config(
+            agent_config_path,
+            base_url=agent_base_url,
+            model=agent_model,
+            api_key=agent_api_key,
+            max_context_tokens=agent_max_context_tokens,
+            max_output_tokens=agent_max_output_tokens,
+        )
 
     ws = Workspace(workspace_root)
 
@@ -885,12 +1223,13 @@ def main() -> None:
             gl,
             project_id=project_id,
             mr_iid=mr_iid,
-            opencode_user_prompt=opencode_user_prompt,
-            opencode_model=opencode_model,
-            opencode_config_path=opencode_config_path,
-            opencode_data_dir=opencode_data_dir,
-            opencode_timeout_seconds=opencode_timeout_seconds,
-            opencode_workdir=workspace_root,
+            coding_agent=coding_agent,
+            agent_user_prompt=agent_user_prompt,
+            agent_model=agent_model,
+            agent_config_path=agent_config_path,
+            agent_data_dir=agent_data_dir,
+            agent_timeout_seconds=agent_timeout_seconds,
+            agent_workdir=workspace_root,
         )
 
     elif task_kind in ("fix_issue", "fix_mr"):
@@ -905,11 +1244,12 @@ def main() -> None:
             kind=kind,
             iid=iid,
             task_kind=task_kind,
-            opencode_user_prompt=opencode_user_prompt,
-            opencode_model=opencode_model,
-            opencode_config_path=opencode_config_path,
-            opencode_data_dir=opencode_data_dir,
-            opencode_timeout_seconds=opencode_timeout_seconds,
+            coding_agent=coding_agent,
+            agent_user_prompt=agent_user_prompt,
+            agent_model=agent_model,
+            agent_config_path=agent_config_path,
+            agent_data_dir=agent_data_dir,
+            agent_timeout_seconds=agent_timeout_seconds,
             precreated_mr_iid=precreated_mr_iid,
             precreated_mr_url=precreated_mr_url,
             precreated_mr_branch=precreated_mr_branch,

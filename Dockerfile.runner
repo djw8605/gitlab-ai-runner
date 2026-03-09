@@ -1,17 +1,27 @@
-# Dockerfile.runner - build the ephemeral OpenCode runner Job image
+# Dockerfile.runner - build the ephemeral coding-agent runner Job image
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# System dependencies for git operations, OpenCode, and common build tooling.
+# System dependencies for git operations, OpenCode, Crush, Kilo, and common tooling.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git \
         curl \
         ca-certificates \
+        gpg \
         bash \
         nodejs \
         npm \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://repo.charm.sh/apt/gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/charm.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
+      > /etc/apt/sources.list.d/charm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends crush \
+    && npm install -g @kilocode/cli \
+    && command -v kilo \
     && curl -fsSL https://opencode.ai/install | bash \
     && opencode_bin="$(command -v opencode || true)" \
     && if [ -z "$opencode_bin" ]; then \
@@ -22,6 +32,8 @@ RUN apt-get update && \
     && test -n "$opencode_bin" \
     && install -m 0755 "$opencode_bin" /usr/local/bin/opencode \
     && /usr/local/bin/opencode --version \
+    && crush -v \
+    && kilo --help >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
@@ -32,5 +44,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY runner/ /app/
 
 # The entrypoint is invoked by the Kubernetes Job spec as python /app/runner.py.
-# runner.py orchestrates GitLab calls and invokes opencode in batch mode.
+# runner.py orchestrates GitLab calls and invokes the selected coding agent in batch mode.
 CMD ["python", "/app/runner.py"]

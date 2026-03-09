@@ -1,6 +1,6 @@
 # gitlab-ai-runner
 
-A self-hosted GitLab **@crush** mention automation that launches Kubernetes Jobs to run an OpenCode-based coding agent against an OpenAI-compatible endpoint (for example, vLLM).
+A self-hosted GitLab **@crush** mention automation that launches Kubernetes Jobs to run a selectable coding agent (`opencode`, `crush`, or `kilo`) against an OpenAI-compatible endpoint (for example, vLLM).
 
 ---
 
@@ -34,9 +34,9 @@ GitLab ──webhook──► webhook receiver (FastAPI, always-on Deployment)
                     Kubernetes Job (ephemeral runner)
                          │
                          ├─ review: fetches MR diff + MR comments + prompt tail
-                         │          → opencode (batch) → posts MR note
+                         │          → selected agent (batch) → posts MR note
                          └─ fix:    clones repo, gathers issue/MR context + prompt tail
-                                    → opencode (batch + tools) → commits → pushes
+                                    → selected agent (batch + tools) → commits → pushes
                                     → opens new MR → posts link
 ```
 
@@ -208,6 +208,7 @@ Comment on any GitLab Issue or Merge Request with one of:
 ```
 @crush review
 @crush review focus on auth edge-cases and suggest tests
+@crush review --agent kilo focus on auth edge-cases and suggest tests
 ```
 
 The runner fetches the MR diff and posts a structured review with sections:
@@ -225,6 +226,8 @@ Anything after `@crush` is forwarded to the runner as additional prompt text.
 ```
 @crush fix
 @crush fix prioritize minimal patch, and add regression test
+@crush fix --agent crush prioritize minimal patch, and add regression test
+@crush fix --agent opencode implement this
 ```
 
 For **Issue** fixes, the webhook first:
@@ -236,11 +239,15 @@ For **Issue** fixes, the webhook first:
 Then the runner:
 1. Reads the issue/MR context and prompt text.
 2. Clones the repository and checks out the target branch.
-3. Runs `opencode` in batch mode with OpenAI-compatible custom provider config.
+3. Runs the selected coding agent in batch mode (`opencode`, `crush`, or `kilo`).
 4. Uses a generic execution-first prompt that instructs the agent to install required dependencies and run relevant smoke checks for the changes.
 5. Runs the project test suite (pytest / npm test / go test) when quick and available.
 6. If checks pass: commits and pushes updates to the existing branch.
 7. Posts update notes back to GitLab.
+
+Agent selection:
+- Default is `opencode` (configurable via `DEFAULT_CODING_AGENT`).
+- Override per note with `--agent <opencode|crush|kilo>` or `--agent=<...>`.
 
 ---
 
@@ -256,9 +263,13 @@ Then the runner:
 | `K8S_NAMESPACE` | ConfigMap | Namespace for runner Jobs (default: current pod namespace) |
 | `WEBHOOK_IMAGE` | ConfigMap | Container image for webhook Deployment |
 | `JOB_IMAGE` | ConfigMap | Container image for runner Jobs |
+| `DEFAULT_CODING_AGENT` | ConfigMap | Default runner agent (`opencode`, `crush`, or `kilo`) |
+| `LLM_BASE_URL` | ConfigMap | Preferred shared OpenAI-compatible endpoint including `/v1`; used by all agents |
+| `LLM_MODEL` | ConfigMap | Preferred shared model name used by all agents |
+| `LLM_API_KEY` | Secret | Preferred shared provider API key used by all agents |
 | `OPENCODE_BASE_URL` | ConfigMap | OpenAI-compatible endpoint including `/v1`, e.g. `http://vllm:8000/v1` |
 | `OPENCODE_MODEL` | ConfigMap | Model name exposed by your provider |
-| `OPENCODE_API_KEY` | Secret | API key for the provider (any string if auth is disabled) |
+| `OPENCODE_API_KEY` | Secret | Legacy fallback API key for compatibility (any string if auth is disabled) |
 | `OPENCODE_TIMEOUT_SECONDS` | ConfigMap | Timeout for each opencode invocation (default: `1800`) |
 | `OPENCODE_MAX_CONTEXT_TOKENS` | ConfigMap | Context token limit written into opencode provider config (default: `128000`) |
 | `OPENCODE_MAX_OUTPUT_TOKENS` | ConfigMap | Max output tokens in opencode config (default: `4096`) |
@@ -277,6 +288,11 @@ Then the runner:
 | `ISSUE_IID` | Issue internal ID (set for fix_issue) |
 | `NOTE_ID` | Triggering comment note ID |
 | `KIND` | `issue` or `mr` |
+| `CODING_AGENT` | Agent selected by webhook (`opencode`, `crush`, or `kilo`) |
+| `AGENT_USER_PROMPT` | Entire text after `@crush` with `--agent` flag removed |
+| `LLM_BASE_URL` | Passed through from receiver |
+| `LLM_MODEL` | Passed through from receiver |
+| `LLM_API_KEY` | Passed through from receiver |
 | `GITLAB_BASE_URL` | Passed through from receiver |
 | `GITLAB_TOKEN` | Passed through from receiver |
 | `OPENCODE_BASE_URL` | Passed through from receiver |
@@ -321,7 +337,7 @@ Then the runner:
 - Fetch Job logs: `kubectl -n unl-weitzel logs job/<job-name>`
 - Common causes:
   - `GITLAB_TOKEN` lacks `write_repository` scope → push fails.
-  - `opencode` provider configuration invalid or unreachable → check `OPENCODE_BASE_URL`, `OPENCODE_MODEL`, and `OPENCODE_API_KEY`.
+  - Agent provider configuration invalid or unreachable → check `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` (or legacy `OPENCODE_*` fallbacks).
   - Provider rejects output token limits → set `OPENCODE_MAX_OUTPUT_TOKENS` to a positive integer.
   - OpenCode returned without edits → runner fails fast with `No filesystem changes detected.`
   - Test suite fails → fix the tests or the generated code.
@@ -337,9 +353,9 @@ kubectl -n unl-weitzel describe job <job-name>
 kubectl -n unl-weitzel logs job/<job-name>
 ```
 
-Runner logs include streamed `opencode` stdout/stderr lines (prefixed as `opencode stdout | ...` / `opencode stderr | ...`) and post-run diagnostics.
-Runner logs also include fail-fast diagnostics after each opencode run:
-- OpenCode command + exit code
+Runner logs include streamed agent stdout/stderr lines (prefixed as `opencode ...`, `crush ...`, or `kilo ...`) and post-run diagnostics.
+Runner logs also include fail-fast diagnostics after each agent run:
+- Agent command + exit code
 - Tail of stdout/stderr
 - `git status --porcelain`
 - `git diff --stat` when changes exist
