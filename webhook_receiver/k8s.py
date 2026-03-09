@@ -120,7 +120,7 @@ def create_job(
 
     job_spec = client.V1JobSpec(
         template=pod_template,
-        backoff_limit=6,
+        backoff_limit=0,
         ttl_seconds_after_finished=ttl_seconds,
     )
 
