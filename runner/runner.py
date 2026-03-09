@@ -495,74 +495,94 @@ def run_fix(
     notes_context = _format_notes_context(item_notes)
     user_prompt = crush_user_prompt or "(none)"
     anchor_file = crush_execution_anchor_file.strip()
-    if anchor_file:
-        first_action = textwrap.dedent(
+    if task_kind == "fix_issue":
+        # System prompt intentionally commented out for issue fixes.
+        prompt = textwrap.dedent(
             f"""\
-            - Create or update `{anchor_file}` and ensure `.crush/` is listed in `.gitignore`.
-            - Write one line containing task identifiers: task kind, target, and timestamp.
-            - If you cannot edit files for some reason, run `pwd && ls -la` and stop with the error.
+            Project: {path_with_namespace}
+            Task kind: {task_kind}
+            Target: {back_ref}
+            Title: {item_title}
+
+            Description:
+            {item_description}
+
+            Additional Prompt from Trigger Comment (everything after @crush):
+            {user_prompt}
+
+            {context_label}:
+            {notes_context}
             """
-        ).strip()
-    else:
-        first_action = (
-            "- Run `pwd && ls -la` as your first action to prove tool execution is active."
         )
+    else:
+        if anchor_file:
+            first_action = textwrap.dedent(
+                f"""\
+                - Create or update `{anchor_file}` and ensure `.crush/` is listed in `.gitignore`.
+                - Write one line containing task identifiers: task kind, target, and timestamp.
+                - If you cannot edit files for some reason, run `pwd && ls -la` and stop with the error.
+                """
+            ).strip()
+        else:
+            first_action = (
+                "- Run `pwd && ls -la` as your first action to prove tool execution is active."
+            )
 
-    prompt = textwrap.dedent(
-        f"""\
-        You are operating inside a Linux container with a git repo.
+        prompt = textwrap.dedent(
+            f"""\
+            You are operating inside a Linux container with a git repo.
 
-        Execution policy:
-        - You must start by using a tool (bash or edit). No pure-text responses.
-        - Prefer making a small, working change in this run.
-        - If the task is large, complete a Phase 1 slice and stop.
-        - Do not restate architecture.
-        - Do not produce long plans or todo lists.
-        - Every step must run a shell command or edit a file.
-        - No external tool APIs are available (do not reference todos/tools).
+            Execution policy:
+            - You must start by using a tool (bash or edit). No pure-text responses.
+            - Prefer making a small, working change in this run.
+            - If the task is large, complete a Phase 1 slice and stop.
+            - Do not restate architecture.
+            - Do not produce long plans or todo lists.
+            - Every step must run a shell command or edit a file.
+            - No external tool APIs are available (do not reference todos/tools).
 
-        Task kind: {task_kind}
-        Project: {path_with_namespace}
-        Target: {back_ref}
-        Title: {item_title}
+            Task kind: {task_kind}
+            Project: {path_with_namespace}
+            Target: {back_ref}
+            Title: {item_title}
 
-        Description:
-        {item_description}
+            Description:
+            {item_description}
 
-        Additional Prompt from Trigger Comment (everything after @crush):
-        {user_prompt}
+            Additional Prompt from Trigger Comment (everything after @crush):
+            {user_prompt}
 
-        {context_label}:
-        {notes_context}
+            {context_label}:
+            {notes_context}
 
-        Safety and correctness:
-        - If a command fails, print the exact command and error output, then stop.
-        - Do not commit or push.
+            Safety and correctness:
+            - If a command fails, print the exact command and error output, then stop.
+            - Do not commit or push.
 
-        Tooling:
-        - Available tools: bash, edit, view, grep, ls.
-        - Do not install system packages unless the task cannot proceed without them.
-        - Prefer repository-local approaches first.
-        - If system install is required, explain why, then install minimally.
-        - If install fails due to permissions/network, continue with file-only changes and document next steps.
+            Tooling:
+            - Available tools: bash, edit, view, grep, ls.
+            - Do not install system packages unless the task cannot proceed without them.
+            - Prefer repository-local approaches first.
+            - If system install is required, explain why, then install minimally.
+            - If install fails due to permissions/network, continue with file-only changes and document next steps.
 
-        Mandatory first action:
-        {first_action}
+            Mandatory first action:
+            {first_action}
 
-        Instructions:
-        - Make the smallest working change that moves the task forward.
-        - If the task is broad, implement only a Phase 1 slice in this run (minimal scaffolding or one working path), then stop.
-        - Edit files directly in this working tree.
-        - For large tasks, leave clear TODO comments in code for subsequent phases.
-        - Run relevant tests only if available and quick; otherwise skip and note it.
-        - If no file edits are needed, still run at least one safe command and include:
-          {NO_FILE_EDITS_MARKER} <reason>
-        - Finish by printing a short Markdown summary with sections:
-          ## Summary
-          ## Files Changed
-          ## Tests Run
-        """
-    )
+            Instructions:
+            - Make the smallest working change that moves the task forward.
+            - If the task is broad, implement only a Phase 1 slice in this run (minimal scaffolding or one working path), then stop.
+            - Edit files directly in this working tree.
+            - For large tasks, leave clear TODO comments in code for subsequent phases.
+            - Run relevant tests only if available and quick; otherwise skip and note it.
+            - If no file edits are needed, still run at least one safe command and include:
+              {NO_FILE_EDITS_MARKER} <reason>
+            - Finish by printing a short Markdown summary with sections:
+              ## Summary
+              ## Files Changed
+              ## Tests Run
+            """
+        )
 
     try:
         crush_summary = _run_crush(
