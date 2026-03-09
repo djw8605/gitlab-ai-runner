@@ -12,7 +12,7 @@ RUN apt-get update && \
         bash \
         nodejs \
         npm \
-    && OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash \
+    && curl -fsSL https://opencode.ai/install | OPENCODE_INSTALL_DIR=/usr/local/bin bash \
     && opencode --version \
     && rm -rf /var/lib/apt/lists/*
 
