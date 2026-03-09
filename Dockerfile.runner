@@ -12,8 +12,8 @@ RUN apt-get update && \
         bash \
         nodejs \
         npm \
-    && curl -fsSL https://opencode.ai/install | bash \
-    && install -m 0755 /root/.local/bin/opencode /usr/local/bin/opencode \
+    && OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash \
+    && opencode --version \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
