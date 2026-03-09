@@ -15,7 +15,7 @@ import sys
 import textwrap
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 from gitlab import GitLabClient, GitLabError
 from workspace import MAX_DIFF_CHARS, Workspace
@@ -213,7 +213,7 @@ def _run_opencode(
     stdout_buf: list[str] = []
     stderr_buf: list[str] = []
 
-    def _pump(stream: Optional[object], prefix: str, buf: list[str]) -> None:
+    def _pump(stream: Optional[TextIO], prefix: str, buf: list[str]) -> None:
         if stream is None:
             return
         # line-buffered stream copy so agent output appears in pod logs.
@@ -470,15 +470,74 @@ def run_fix(
         f"""\
         You are operating inside a Linux container with a git repository.
 
-        Execution and validation requirements:
-        - Implement concrete file changes for the requested task.
-        - Determine the project tooling from repository files and docs.
-        - Install any missing dependencies required to run changed code.
-        - Run at least one relevant smoke check for what you changed
-          (for example: build, test, start command, health check, or CLI invocation).
-        - If a command fails, fix the issue and rerun checks.
-        - If validation cannot run (missing network/permissions/time), state exactly what blocked it.
-        - Do not commit or push.
+        ⚠️ CRITICAL EXECUTION AND VALIDATION REQUIREMENTS ⚠️
+
+        You MUST complete ALL of these steps in order. The task is NOT complete until validation passes.
+
+        1. ANALYZE THE PROJECT:
+           - Examine package.json, requirements.txt, Cargo.toml, go.mod, or other dependency files
+           - Identify the project type (Node.js, Python, Go, Rust, etc.)
+           - Check for existing test scripts and build commands in package.json, Makefile, or CI configs
+
+        2. IMPLEMENT THE REQUESTED CHANGES:
+           - Make concrete file edits to address the task
+           - Follow existing code patterns and style
+
+        3. INSTALL DEPENDENCIES (MANDATORY):
+           - Python projects: Run `pip install -r requirements.txt` or `pip install -e .`
+           - Node.js/Next.js: Run `npm install` or `yarn install`
+           - Go projects: Run `go mod download`
+           - Rust projects: Run `cargo fetch`
+           - NEVER skip this step, even if you think dependencies are already installed
+
+        4. RUN SMOKE TESTS (MANDATORY - DO NOT SKIP):
+           You MUST run at least one validation command appropriate to the project type:
+           
+           For Node.js/Next.js projects:
+           - Run `npm run build` to verify the build succeeds
+           - Run `npm run dev` or `npm start` with a 10-second timeout to verify it starts
+           - Run `npm test` if tests exist
+           
+           For Python projects:
+           - Run `python -m pytest` if tests exist
+           - Run `python -m py_compile <changed_files>` to verify syntax
+           - Import the module: `python -c "import module_name"` to verify it loads
+           
+           For Go projects:
+           - Run `go build ./...` to verify compilation
+           - Run `go test ./...` if tests exist
+           
+           For Docker projects:
+           - Run `docker build -f Dockerfile .` to verify the image builds
+           
+           For any project:
+           - Run any start/serve command briefly to verify it launches
+           - Execute relevant CLI commands to verify functionality
+           - Run linters or formatters if configured (eslint, black, rustfmt, etc.)
+
+        5. HANDLE FAILURES:
+           - If ANY validation command fails, analyze the error output
+           - Fix the issue (install missing packages, fix syntax errors, update configs)
+           - Rerun the validation command to confirm the fix works
+           - Repeat until validation passes
+
+        6. REPORT RESULTS:
+           - Show the output of all validation commands you ran
+           - If validation cannot run (missing external services, network, credentials), 
+             state EXACTLY what blocked it and what would be needed to validate
+           - Do NOT say validation passed without showing actual command output
+
+        ❌ DO NOT:
+           - Skip dependency installation
+           - Skip smoke testing
+           - Assume tests will pass without running them
+           - Commit or push changes (this is handled separately)
+
+        ✅ VALIDATION SUCCESS CRITERIA:
+           - Dependencies are installed
+           - At least one build/test/start command executed successfully
+           - All executed validation commands exited with code 0
+           - Any failures were fixed and retested
 
         Project: {path_with_namespace}
         Task kind: {task_kind}

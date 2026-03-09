@@ -39,10 +39,24 @@ def _run(
     if result.returncode != 0:
         stdout = result.stdout or ""
         stderr = result.stderr or ""
-        logger.error("Command failed (exit %d):\n%s\n%s", result.returncode, stdout, stderr)
         if check:
+            logger.error(
+                "Command failed (exit %d):\n%s\n%s", result.returncode, stdout, stderr
+            )
             raise subprocess.CalledProcessError(
                 result.returncode, cmd, output=stdout, stderr=stderr
+            )
+        if stdout or stderr:
+            logger.info(
+                "Command returned non-zero (exit %d, check disabled):\n%s\n%s",
+                result.returncode,
+                stdout,
+                stderr,
+            )
+        else:
+            logger.info(
+                "Command returned non-zero (exit %d, check disabled).",
+                result.returncode,
             )
     return result
 
