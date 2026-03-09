@@ -427,6 +427,9 @@ async def webhook(
         or os.environ.get("KILO_MAX_OUTPUT_TOKENS")
         or ""
     )
+    aider_api_key = llm_api_key
+    if aider_api_key and "=" not in aider_api_key:
+        aider_api_key = f"openai={aider_api_key}"
 
     env_vars: dict[str, str] = {
         "TASK_KIND": task_kind,
@@ -450,7 +453,7 @@ async def webhook(
         "OPENCODE_MAX_OUTPUT_TOKENS": llm_max_output_tokens,
         "AIDER_BASE_URL": llm_base_url,
         "AIDER_MODEL": llm_model,
-        "AIDER_API_KEY": llm_api_key,
+        "AIDER_API_KEY": aider_api_key,
         "AIDER_TIMEOUT_SECONDS": llm_timeout,
         "AIDER_MAX_CONTEXT_TOKENS": llm_max_context_tokens,
         "AIDER_MAX_OUTPUT_TOKENS": llm_max_output_tokens,

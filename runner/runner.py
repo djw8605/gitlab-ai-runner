@@ -379,6 +379,8 @@ class _AiderExecutor(_BaseAgentExecutor):
         model = self.settings.model
         if not model.startswith("openai/"):
             model = f"openai/{model}"
+        chat_history_file = self.settings.data_dir / ".aider.chat.history.md"
+        input_history_file = self.settings.data_dir / ".aider.input.history"
         # Headless mode: --message runs one request and exits.
         return [
             "aider",
@@ -386,14 +388,25 @@ class _AiderExecutor(_BaseAgentExecutor):
             model,
             "--yes",
             "--no-auto-commits",
+            "--chat-history-file",
+            str(chat_history_file),
+            "--input-history-file",
+            str(input_history_file),
             "--message",
             prompt,
         ]
 
     def _prepare_env(self) -> dict[str, str]:
         env = super()._prepare_env()
+        # Remove inherited Aider-specific settings from parent env so this
+        # invocation is fully controlled by runner-provided values.
+        for key in [k for k in env if k.startswith("AIDER_")]:
+            env.pop(key, None)
         env["OPENAI_API_BASE"] = self.settings.base_url
         env["OPENAI_API_KEY"] = self.settings.api_key
+        # Aider accepts provider-formatted credentials via AIDER_API_KEY.
+        # Keep it explicit to avoid "Invalid --api-key format" failures.
+        env["AIDER_API_KEY"] = f"openai={self.settings.api_key}"
         return env
 
 
