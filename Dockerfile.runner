@@ -2,6 +2,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+ENV PATH="/root/.local/bin:${PATH}"
 
 # System dependencies for git operations, OpenCode, Aider, Kilo, and common tooling.
 RUN apt-get update && \
@@ -13,7 +14,7 @@ RUN apt-get update && \
         nodejs \
         npm \
     && python -m pip install --no-cache-dir aider-install \
-    && aider-install \
+    && (SHELL=/bin/bash aider-install || true) \
     && aider_bin="$(command -v aider || true)" \
     && if [ -z "$aider_bin" ]; then \
          for candidate in /root/.local/bin/aider /root/.local/share/aider/bin/aider /root/.local/share/uv/tools/aider-chat/bin/aider; do \
