@@ -70,7 +70,13 @@ def create_job(
     mem_lim = mem_limit or os.environ.get("JOB_MEM_LIMIT", DEFAULT_MEM_LIMIT)
 
     # Build the env list, masking sensitive values from logs
-    sensitive_keys = {"GITLAB_TOKEN", "CRUSH_API_KEY", "LLM_API_KEY", "WEBHOOK_SECRET"}
+    sensitive_keys = {
+        "GITLAB_TOKEN",
+        "OPENCODE_API_KEY",
+        "CRUSH_API_KEY",
+        "LLM_API_KEY",
+        "WEBHOOK_SECRET",
+    }
     k8s_env = []
     for key, value in env_vars.items():
         k8s_env.append(client.V1EnvVar(name=key, value=value))

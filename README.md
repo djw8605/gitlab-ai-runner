@@ -1,6 +1,6 @@
 # gitlab-ai-runner
 
-A self-hosted GitLab **@crush** mention automation that launches Kubernetes Jobs to run a Crush-based coding agent against an OpenAI-compatible endpoint (for example, vLLM).
+A self-hosted GitLab **@crush** mention automation that launches Kubernetes Jobs to run an OpenCode-based coding agent against an OpenAI-compatible endpoint (for example, vLLM).
 
 ---
 
@@ -34,9 +34,9 @@ GitLab ──webhook──► webhook receiver (FastAPI, always-on Deployment)
                     Kubernetes Job (ephemeral runner)
                          │
                          ├─ review: fetches MR diff + MR comments + prompt tail
-                         │          → crush (batch) → posts MR note
+                         │          → opencode (batch) → posts MR note
                          └─ fix:    clones repo, gathers issue/MR context + prompt tail
-                                    → crush (batch + tools) → commits → pushes
+                                    → opencode (batch + tools) → commits → pushes
                                     → opens new MR → posts link
 ```
 
@@ -56,7 +56,7 @@ gitlab-ai-runner/
 ├── runner/
 │   ├── runner.py        # Job entrypoint
 │   ├── gitlab.py        # GitLab client (shared logic)
-│   ├── llm.py           # Legacy LLM wrapper (not used by the crush runner)
+│   ├── llm.py           # Legacy LLM wrapper (not used by the opencode runner)
 │   ├── workspace.py     # git clone/branch/commit/push + test runner
 │   └── requirements.txt
 ├── Dockerfile.webhook   # Image for the webhook receiver Deployment
@@ -217,7 +217,7 @@ The runner fetches the MR diff and posts a structured review with sections:
 - Suggested Tests
 - Security Notes
 
-Anything after `@crush` is forwarded to crush as additional prompt text.
+Anything after `@crush` is forwarded to the runner as additional prompt text.
 
 ### `@crush fix`
 *Works on Issues and Merge Requests.*
@@ -236,8 +236,8 @@ For **Issue** fixes, the webhook first:
 Then the runner:
 1. Reads the issue/MR context and prompt text.
 2. Clones the repository and checks out the target branch.
-3. Runs `crush` in execution-first batch mode (tool action required at start).
-4. Applies an incremental Phase 1 slice for broad tasks, instead of attempting the full project in one run.
+3. Runs `opencode` in batch mode with OpenAI-compatible custom provider config.
+4. Sends task context directly (no system prompt scaffolding).
 5. Avoids system package installs unless strictly required; prefers repo-local/file-first changes.
 6. Runs the test suite (pytest / npm test / go test) when quick and available.
 7. If tests pass: commits and pushes updates to the existing branch.
@@ -257,13 +257,11 @@ Then the runner:
 | `K8S_NAMESPACE` | ConfigMap | Namespace for runner Jobs (default: current pod namespace) |
 | `WEBHOOK_IMAGE` | ConfigMap | Container image for webhook Deployment |
 | `JOB_IMAGE` | ConfigMap | Container image for runner Jobs |
-| `CRUSH_BASE_URL` | ConfigMap | Crush model provider endpoint including `/v1`, e.g. `http://vllm:8000/v1` |
-| `CRUSH_MODEL` | ConfigMap | Model name exposed by your provider |
-| `CRUSH_API_KEY` | Secret | API key for the provider (any string if auth is disabled) |
-| `CRUSH_ALLOWED_TOOLS` | ConfigMap | Comma-separated tools auto-allowed in crush config (default: `view,ls,grep,edit,bash`) |
-| `CRUSH_TIMEOUT_SECONDS` | ConfigMap | Timeout for each crush invocation (default: `1800`) |
-| `CRUSH_MAX_TOKENS` | ConfigMap | Max output tokens sent to provider per crush response (default: `4096`) |
-| `CRUSH_EXECUTION_ANCHOR_FILE` | ConfigMap | Marker file path used for mandatory first tool action (default: `.crush/last_run.txt`; empty disables marker-file instruction) |
+| `OPENCODE_BASE_URL` | ConfigMap | OpenAI-compatible endpoint including `/v1`, e.g. `http://vllm:8000/v1` |
+| `OPENCODE_MODEL` | ConfigMap | Model name exposed by your provider |
+| `OPENCODE_API_KEY` | Secret | API key for the provider (any string if auth is disabled) |
+| `OPENCODE_TIMEOUT_SECONDS` | ConfigMap | Timeout for each opencode invocation (default: `1800`) |
+| `OPENCODE_MAX_OUTPUT_TOKENS` | ConfigMap | Max output tokens in opencode config (default: `4096`) |
 | `ALLOWED_USERS` | ConfigMap | Comma-separated GitLab usernames; empty = allow all |
 | `JOB_TTL_SECONDS` | ConfigMap | Job TTL after completion (default: `1800`) |
 | `JOB_CPU_LIMIT` | ConfigMap | CPU limit for runner Jobs (default: `4`) |
@@ -281,14 +279,12 @@ Then the runner:
 | `KIND` | `issue` or `mr` |
 | `GITLAB_BASE_URL` | Passed through from receiver |
 | `GITLAB_TOKEN` | Passed through from receiver |
-| `CRUSH_BASE_URL` | Passed through from receiver |
-| `CRUSH_MODEL` | Passed through from receiver |
-| `CRUSH_API_KEY` | Passed through from receiver |
-| `CRUSH_ALLOWED_TOOLS` | Passed through from receiver |
-| `CRUSH_TIMEOUT_SECONDS` | Passed through from receiver |
-| `CRUSH_MAX_TOKENS` | Passed through from receiver |
-| `CRUSH_EXECUTION_ANCHOR_FILE` | Passed through from receiver |
-| `CRUSH_USER_PROMPT` | Entire text after `@crush` from the triggering comment |
+| `OPENCODE_BASE_URL` | Passed through from receiver |
+| `OPENCODE_MODEL` | Passed through from receiver |
+| `OPENCODE_API_KEY` | Passed through from receiver |
+| `OPENCODE_TIMEOUT_SECONDS` | Passed through from receiver |
+| `OPENCODE_MAX_OUTPUT_TOKENS` | Passed through from receiver |
+| `OPENCODE_USER_PROMPT` | Entire text after `@crush` from the triggering comment |
 | `PRECREATED_MR_IID` | For issue fixes: MR IID prepared by webhook |
 | `PRECREATED_MR_URL` | For issue fixes: MR URL prepared by webhook |
 | `PRECREATED_MR_BRANCH` | For issue fixes: branch prepared by webhook |
@@ -324,9 +320,9 @@ Then the runner:
 - Fetch Job logs: `kubectl -n unl-weitzel logs job/<job-name>`
 - Common causes:
   - `GITLAB_TOKEN` lacks `write_repository` scope → push fails.
-  - `crush` provider configuration invalid or unreachable → check `CRUSH_BASE_URL`, `CRUSH_MODEL`, and `CRUSH_API_KEY`.
-  - Provider rejects `max_tokens` (for example `max_tokens must be at least 1`) → set `CRUSH_MAX_TOKENS` to a positive integer.
-  - Crush returned planning text but made no edits → runner now fails fast with `No filesystem changes detected.`
+  - `opencode` provider configuration invalid or unreachable → check `OPENCODE_BASE_URL`, `OPENCODE_MODEL`, and `OPENCODE_API_KEY`.
+  - Provider rejects output token limits → set `OPENCODE_MAX_OUTPUT_TOKENS` to a positive integer.
+  - OpenCode returned without edits → runner fails fast with `No filesystem changes detected.`
   - Test suite fails → fix the tests or the generated code.
 
 ### Duplicate Jobs
@@ -340,9 +336,9 @@ kubectl -n unl-weitzel describe job <job-name>
 kubectl -n unl-weitzel logs job/<job-name>
 ```
 
-Runner logs include streamed `crush` stdout/stderr lines (prefixed as `crush stdout | ...` / `crush stderr | ...`) and post-run diagnostics.
-Runner logs also include fail-fast diagnostics after each crush run:
-- Crush command + exit code
+Runner logs include streamed `opencode` stdout/stderr lines (prefixed as `opencode stdout | ...` / `opencode stderr | ...`) and post-run diagnostics.
+Runner logs also include fail-fast diagnostics after each opencode run:
+- OpenCode command + exit code
 - Tail of stdout/stderr
 - `git status --porcelain`
 - `git diff --stat` when changes exist

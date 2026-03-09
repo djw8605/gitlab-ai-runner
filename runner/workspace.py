@@ -115,8 +115,8 @@ class Workspace:
         self._repo_dir = dest
 
         # Configure git identity for commits
-        _run(["git", "config", "user.email", "crush-bot@localhost"], cwd=dest)
-        _run(["git", "config", "user.name", "Crush Bot"], cwd=dest)
+        _run(["git", "config", "user.email", "opencode-bot@localhost"], cwd=dest)
+        _run(["git", "config", "user.name", "OpenCode Bot"], cwd=dest)
 
         return dest
 

@@ -1,4 +1,4 @@
-"""FastAPI webhook receiver for GitLab @crush mention automation."""
+"""FastAPI webhook receiver for GitLab @crush -> OpenCode automation."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="GitLab Crush Webhook Receiver", version="1.0.0")
+app = FastAPI(title="GitLab OpenCode Webhook Receiver", version="1.0.0")
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -258,7 +258,7 @@ async def webhook(
         mr_title = f"fix: resolve issue #{issue_iid} - {issue_title}"
         mr_description = (
             f"Closes #{issue_iid}\n\n"
-            f"This merge request was automatically created by Crush from issue #{issue_iid}."
+            f"This merge request was automatically created by OpenCode from issue #{issue_iid}."
         )
 
         try:
@@ -286,7 +286,7 @@ async def webhook(
             gl.post_issue_note(
                 project_id,
                 issue_iid,
-                f"🚧 **Crush**: Creating merge request {mr_ref} to fix this issue.",
+                f"🚧 **OpenCode**: Creating merge request {mr_ref} to fix this issue.",
             )
             logger.info(
                 "Prepared issue fix MR !%s for issue #%s using branch %s",
@@ -309,17 +309,28 @@ async def webhook(
         "KIND": kind,
         "GITLAB_BASE_URL": os.environ.get("GITLAB_BASE_URL", ""),
         "GITLAB_TOKEN": os.environ.get("GITLAB_TOKEN", ""),
-        "CRUSH_BASE_URL": os.environ.get("CRUSH_BASE_URL", os.environ.get("LLM_BASE_URL", "")),
-        "CRUSH_MODEL": os.environ.get("CRUSH_MODEL", os.environ.get("LLM_MODEL", "")),
-        "CRUSH_API_KEY": os.environ.get("CRUSH_API_KEY", os.environ.get("LLM_API_KEY", "")),
-        "CRUSH_ALLOWED_TOOLS": os.environ.get("CRUSH_ALLOWED_TOOLS", ""),
-        "CRUSH_TIMEOUT_SECONDS": os.environ.get("CRUSH_TIMEOUT_SECONDS", ""),
-        "CRUSH_MAX_TOKENS": os.environ.get("CRUSH_MAX_TOKENS", ""),
-        "CRUSH_EXECUTION_ANCHOR_FILE": os.environ.get(
-            "CRUSH_EXECUTION_ANCHOR_FILE", ""
+        "OPENCODE_BASE_URL": os.environ.get(
+            "OPENCODE_BASE_URL",
+            os.environ.get("CRUSH_BASE_URL", os.environ.get("LLM_BASE_URL", "")),
+        ),
+        "OPENCODE_MODEL": os.environ.get(
+            "OPENCODE_MODEL",
+            os.environ.get("CRUSH_MODEL", os.environ.get("LLM_MODEL", "")),
+        ),
+        "OPENCODE_API_KEY": os.environ.get(
+            "OPENCODE_API_KEY",
+            os.environ.get("CRUSH_API_KEY", os.environ.get("LLM_API_KEY", "")),
+        ),
+        "OPENCODE_TIMEOUT_SECONDS": os.environ.get(
+            "OPENCODE_TIMEOUT_SECONDS",
+            os.environ.get("CRUSH_TIMEOUT_SECONDS", ""),
+        ),
+        "OPENCODE_MAX_OUTPUT_TOKENS": os.environ.get(
+            "OPENCODE_MAX_OUTPUT_TOKENS",
+            os.environ.get("CRUSH_MAX_TOKENS", ""),
         ),
         # Entire text after "@crush", including the command token.
-        "CRUSH_USER_PROMPT": user_prompt,
+        "OPENCODE_USER_PROMPT": user_prompt,
     }
     if mr_iid is not None:
         env_vars["MR_IID"] = str(mr_iid)
@@ -360,7 +371,7 @@ async def webhook(
                 project_id,
                 kind,
                 iid,
-                f"⚠️ **Crush**: Failed to start runner job.\n\n```\n{exc}\n```",
+                f"⚠️ **OpenCode**: Failed to start runner job.\n\n```\n{exc}\n```",
             )
         except GitLabError as gl_exc:
             logger.warning("Could not post failure note: %s", gl_exc)
