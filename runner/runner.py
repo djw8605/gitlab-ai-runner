@@ -36,6 +36,7 @@ DEFAULT_CRUSH_MAX_TOKENS = 4096
 MAX_CONTEXT_NOTES = 30
 MAX_NOTE_BODY_CHARS = 1200
 MAX_NOTES_CONTEXT_CHARS = 16000
+NO_CHANGES_SENTINEL = "NO_CHANGES_POSSIBLE"
 
 
 # ---------------------------------------------------------------------------
@@ -484,10 +485,13 @@ def run_fix(
         Instructions:
         - Implement the smallest correct fix for the request.
         - Edit files directly in this working tree.
+        - Do not stay in planning mode; make concrete file edits after brief inspection.
         - Use available tools as needed (including bash/edit/view/grep/ls).
         - Do NOT commit or push.
         - Run relevant tests or checks when possible.
         - Keep your reasoning concise and practical.
+        - If no safe/code-valid change is possible, output exactly:
+          NO_CHANGES_POSSIBLE: <one short reason>
         - Finish by printing a short Markdown summary with sections:
           ## Thinking
           ## Summary
@@ -514,6 +518,51 @@ def run_fix(
             f"⚠️ **Crush**: automated fix failed.\n\n```\n{exc}\n```",
         )
         sys.exit(1)
+
+    # One retry pass if crush returned without modifying files and did not
+    # explicitly declare no-change feasibility.
+    if not ws.has_changes() and NO_CHANGES_SENTINEL not in crush_summary:
+        logger.info("No file changes detected after first crush pass; running retry pass")
+        retry_timeout_seconds = max(120, min(600, crush_timeout_seconds // 2))
+        retry_prompt = textwrap.dedent(
+            f"""\
+            The previous run did not edit any files.
+
+            You must now do exactly one of the following:
+            1. Make at least one concrete code edit that moves this task forward.
+            2. If no safe code change is possible, output exactly:
+               {NO_CHANGES_SENTINEL}: <one short reason>
+
+            Task kind: {task_kind}
+            Project: {path_with_namespace}
+            Target: {back_ref}
+            Title: {item_title}
+
+            Additional Prompt from Trigger Comment (everything after @crush):
+            {user_prompt}
+            """
+        )
+        try:
+            retry_summary = _run_crush(
+                cwd=ws.repo_dir,
+                prompt=retry_prompt,
+                model=crush_model,
+                config_path=crush_config_path,
+                data_dir=crush_data_dir,
+                timeout_seconds=retry_timeout_seconds,
+            )
+            crush_summary = (
+                f"{crush_summary}\n\n## Retry Pass\n\n{retry_summary}"
+            ).strip()
+        except RuntimeError as exc:
+            logger.error("Crush retry pass failed: %s", exc)
+            gl.post_note(
+                project_id,
+                kind,
+                iid,
+                f"⚠️ **Crush**: retry pass failed.\n\n```\n{exc}\n```",
+            )
+            sys.exit(1)
 
     commit_msg = f"chore: Crush automated fix for {back_ref}\n\nTask: {item_title}"
     ws.commit_all(commit_msg)
