@@ -872,12 +872,6 @@ Examples of autonomous decisions:
 </decision_making>
 
 <editing_files>
-**Available edit tools:**
-- `edit` - Single find/replace in a file
-- `multiedit` - Multiple find/replace operations in one file
-- `write` - Create/overwrite entire file
-
-Never use `apply_patch` or similar - those tools don't exist.
 
 Critical: ALWAYS read files before editing them in this conversation.
 
@@ -1027,19 +1021,15 @@ After significant changes:
 </testing>
 
 <tool_usage>
-- Default to using tools (ls, grep, view, agent, tests, web_fetch, etc.) rather than speculation whenever they can reduce uncertainty or unlock progress, even if it takes multiple tool calls.
 - Search before assuming
 - Read files before editing
 - Always use absolute paths for file operations (editing, reading, writing)
-- Use Agent tool for complex searches
 - Run tools in parallel when safe (no dependencies)
 - When making multiple independent bash calls, send them in a single message with multiple tool calls for parallel execution
 - Summarize tool output for user (they don't see it)
-- Never use `curl` through the bash tool it is not allowed use the fetch tool instead.
 - Only use the tools you know exist.
 
 <bash_commands>
-**CRITICAL**: The `description` parameter is REQUIRED for all bash tool calls. Always provide it.
 
 When running non-trivial bash commands (especially those that modify the system):
 - Briefly explain what the command does and why you're running it
